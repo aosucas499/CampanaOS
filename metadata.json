@@ -1,0 +1,6 @@
+{
+  "name": "CampanaOS — Timbre Escolar Linux y Raspberry Pi",
+  "description": "Controlador horario, gestor de audio y generador de despliegue Linux/Raspberry Pi con soporte GPIO para timbres escolares.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
