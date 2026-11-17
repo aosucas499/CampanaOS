@@ -403,12 +403,16 @@ export function HardwareAudioView({
               className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm text-slate-900 bg-white focus:outline-none focus:ring-2 focus:ring-slate-900"
             >
               <option value="default">Predeterminada del sistema</option>
-              <option value="hw:0,0">Jack 3.5 mm / Línea (hw:0,0)</option>
+              <option value="hw:0,0">Jack 3.5 mm / Línea (Auto Headphones / hw:0,0)</option>
               <option value="hdmi">Salida HDMI</option>
               <option value="usb-audio">Tarjeta de sonido USB</option>
             </select>
           </div>
         </div>
+
+        <p className="text-xs text-slate-500">
+          En Raspberry Pi 3/4 con Trixie Desktop 32 bits, la opción <span className="font-medium text-slate-700">Jack 3.5 mm</span> autodetecta la salida <span className="font-mono">Headphones</span> sobre PipeWire/ALSA aunque HDMI ocupe <span className="font-mono">hw:0,0</span> (Raspberry Pi 5 requiere tarjeta USB o HDMI).
+        </p>
 
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-1">
           <div className="flex-1 max-w-md">

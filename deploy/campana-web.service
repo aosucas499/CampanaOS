@@ -1,0 +1,20 @@
+[Unit]
+Description=CampanaOS - Panel Web Local y en Red (puerto 3000)
+After=network-online.target avahi-daemon.service sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__CAMPANA_USER__
+WorkingDirectory=/opt/campana-os
+Environment=PORT=3000
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_RUNTIME_DIR=/run/user/__CAMPANA_UID__
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__CAMPANA_UID__/bus
+Environment=PULSE_RUNTIME_PATH=/run/user/__CAMPANA_UID__/pulse
+ExecStart=/usr/bin/python3 /opt/campana-os/web_panel.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

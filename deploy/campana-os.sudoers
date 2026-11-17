@@ -1,0 +1,2 @@
+# Permite al panel web local de CampanaOS recargar los systemd timers sin ejecutar Python web como root
+__CAMPANA_USER__ ALL=(root) NOPASSWD: /usr/bin/python3 /opt/campana-os/sync_timers.py

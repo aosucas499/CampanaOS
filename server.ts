@@ -21,9 +21,9 @@ import type {
   BellScheduleItem,
   HardwareConfig,
   HolidayException,
-  SecurityNetworkConfig,
   SystemdSyncStatus,
 } from './src/types/bell.ts';
+import { createDefaultBellState } from './src/utils/defaultState.ts';
 import {
   generateInstallScript,
   generateReadme,
@@ -163,167 +163,9 @@ function countActiveTimers(s: BellAppState): number {
   ).length;
 }
 
-function createDefaultState(): BellAppState {
-  const profiles: BellProfile[] = [
-    {
-      id: 'prof-normal',
-      name: 'Horario Lectivo Normal',
-      description: 'Jornada escolar ordinaria de lunes a viernes con 6 periodos y recreo de 30 min.',
-      isSilent: false,
-    },
-    {
-      id: 'prof-exams',
-      name: 'Semana de Exámenes',
-      description: 'Bloques de evaluación extendidos de 90 minutos sin timbre intermedio.',
-      isSilent: false,
-    },
-    {
-      id: 'prof-intensive',
-      name: 'Jornada Intensiva (Jun/Sep)',
-      description: 'Horario reducido de mañana de 08:30 a 13:30.',
-      isSilent: false,
-    },
-    {
-      id: 'prof-silent',
-      name: 'Modo Silencio (Vacaciones)',
-      description: 'Desactiva temporalmente todos los toques automáticos manteniendo el sistema activo.',
-      isSilent: true,
-    },
-  ];
-
-  const tones: AudioTone[] = [
-    {
-      id: 'classic-bell',
-      name: 'Timbre Clásico Escolar',
-      category: 'built-in',
-      description: 'Timbre tradicional nítido para entradas y salidas de clase.',
-      durationSec: 3.5,
-      synthPreset: 'classic-bell',
-    },
-    {
-      id: 'westminster',
-      name: 'Carrillón Westminster',
-      category: 'built-in',
-      description: 'Secuencia armónica de 4 notas tubulares para inicio y fin de jornada.',
-      durationSec: 6.5,
-      synthPreset: 'westminster',
-    },
-    {
-      id: 'soft-chime',
-      name: 'Melodía Suave Inclusiva',
-      category: 'built-in',
-      description: 'Arpegio cálido de baja estridencia recomendado para aulas TEA.',
-      durationSec: 3.0,
-      synthPreset: 'soft-chime',
-    },
-    {
-      id: 'recess-bell',
-      name: 'Aviso Dual de Recreo',
-      category: 'built-in',
-      description: 'Doble campana armónica para inicio y fin de patio.',
-      durationSec: 2.2,
-      synthPreset: 'recess-bell',
-    },
-    {
-      id: 'evacuation',
-      name: 'Sirena de Evacuación',
-      category: 'built-in',
-      description: 'Señal acústica modulada reservada para simulacros y emergencias.',
-      durationSec: 4.8,
-      synthPreset: 'evacuation',
-    },
-  ];
-
-  const schedules: BellScheduleItem[] = [
-    { id: 'sch-1', profileId: 'prof-normal', time: '08:15', label: 'Entrada y 1ª Hora', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-    { id: 'sch-2', profileId: 'prof-normal', time: '09:15', label: 'Cambio a 2ª Hora', days: [1, 2, 3, 4, 5], toneId: 'soft-chime', enabled: true },
-    { id: 'sch-3', profileId: 'prof-normal', time: '10:15', label: 'Cambio a 3ª Hora', days: [1, 2, 3, 4, 5], toneId: 'soft-chime', enabled: true },
-    { id: 'sch-4', profileId: 'prof-normal', time: '11:15', label: 'Inicio de Recreo', days: [1, 2, 3, 4, 5], toneId: 'recess-bell', enabled: true },
-    { id: 'sch-5', profileId: 'prof-normal', time: '11:45', label: 'Fin de Recreo y 4ª Hora', days: [1, 2, 3, 4, 5], toneId: 'classic-bell', enabled: true },
-    { id: 'sch-6', profileId: 'prof-normal', time: '12:45', label: 'Cambio a 5ª Hora', days: [1, 2, 3, 4, 5], toneId: 'soft-chime', enabled: true },
-    { id: 'sch-7', profileId: 'prof-normal', time: '13:45', label: 'Cambio a 6ª Hora', days: [1, 2, 3, 4, 5], toneId: 'soft-chime', enabled: true },
-    { id: 'sch-8', profileId: 'prof-normal', time: '14:45', label: 'Salida General', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-    { id: 'sch-ex-1', profileId: 'prof-exams', time: '08:30', label: 'Inicio Bloque 1 Evaluación', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-    { id: 'sch-ex-2', profileId: 'prof-exams', time: '10:00', label: 'Fin Bloque 1 / Descanso', days: [1, 2, 3, 4, 5], toneId: 'recess-bell', enabled: true },
-    { id: 'sch-ex-3', profileId: 'prof-exams', time: '10:30', label: 'Inicio Bloque 2 Evaluación', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-    { id: 'sch-ex-4', profileId: 'prof-exams', time: '12:00', label: 'Fin de Jornada de Exámenes', days: [1, 2, 3, 4, 5], toneId: 'classic-bell', enabled: true },
-    { id: 'sch-int-1', profileId: 'prof-intensive', time: '08:30', label: 'Entrada Jornada Intensiva', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-    { id: 'sch-int-2', profileId: 'prof-intensive', time: '10:45', label: 'Recreo Jornada Intensiva', days: [1, 2, 3, 4, 5], toneId: 'recess-bell', enabled: true },
-    { id: 'sch-int-3', profileId: 'prof-intensive', time: '11:15', label: 'Regreso de Recreo', days: [1, 2, 3, 4, 5], toneId: 'classic-bell', enabled: true },
-    { id: 'sch-int-4', profileId: 'prof-intensive', time: '13:30', label: 'Salida Jornada Intensiva', days: [1, 2, 3, 4, 5], toneId: 'westminster', enabled: true },
-  ];
-
-  const holidays: HolidayException[] = [
-    { id: 'hol-1', name: 'Día de la Constitución e Inmaculada', startDate: '2026-12-06', endDate: '2026-12-08' },
-    { id: 'hol-2', name: 'Vacaciones de Navidad', startDate: '2026-12-23', endDate: '2027-01-07' },
-    { id: 'hol-3', name: 'Día del Trabajo', startDate: '2027-05-01', endDate: '2027-05-01' },
-  ];
-
-  const hardware: HardwareConfig = {
-    schoolName: 'I.E.S. Sierra Norte',
-    linuxUser: 'pi',
-    audioBackend: 'mpv',
-    audioOutput: 'default',
-    masterVolume: 85,
-    timezone: 'Europe/Madrid',
-  };
-
-  const security: SecurityNetworkConfig = {
-    authEnabled: false,
-    hasAdminPin: false,
-    lockReadOnlyPreview: false,
-    hostnameMdns: 'campana-escolar',
-    webPort: 3000,
-  };
-
-  const systemdSync: SystemdSyncStatus = {
-    supported: fs.existsSync(OPT_SYNC_SCRIPT),
-    lastSyncedAt: null,
-    activeTimerCount: 8,
-    lastMessage: fs.existsSync(OPT_SYNC_SCRIPT)
-      ? 'Listo para sincronizar unidades systemd .timer.'
-      : 'Vista previa: descarga el paquete .zip para instalar systemd .timer y el panel web Python en Linux.',
-  };
-
-  const logs: BellLogEntry[] = [
-    {
-      id: 'log-seed-1',
-      timestamp: new Date(Date.now() - 3600 * 1000 * 3).toISOString(),
-      timeDisplay: '08:15:00',
-      label: 'Entrada y 1ª Hora',
-      toneName: 'Carrillón Westminster',
-      source: 'automatico',
-      status: 'completado',
-    },
-    {
-      id: 'log-seed-2',
-      timestamp: new Date(Date.now() - 3600 * 1000 * 2).toISOString(),
-      timeDisplay: '09:15:00',
-      label: 'Cambio a 2ª Hora',
-      toneName: 'Melodía Suave Inclusiva',
-      source: 'automatico',
-      status: 'completado',
-    },
-  ];
-
-  return {
-    activeProfileId: 'prof-normal',
-    profiles,
-    schedules,
-    holidays,
-    tones,
-    hardware,
-    security,
-    systemdSync,
-    authenticated: true,
-    logs,
-    serverTimeIso: new Date().toISOString(),
-  };
-}
-
 function loadState(secrets: AuthSecrets): BellAppState {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const defaults = createDefaultState();
+  const defaults = createDefaultBellState({ systemdSupported: fs.existsSync(OPT_SYNC_SCRIPT) });
   if (!fs.existsSync(STATE_FILE)) {
     fs.writeFileSync(STATE_FILE, JSON.stringify(defaults, null, 2), 'utf-8');
     return defaults;

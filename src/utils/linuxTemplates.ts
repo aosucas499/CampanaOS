@@ -94,8 +94,12 @@ export function generateTimerPreviewUnits(state: BellAppState): string {
     .join('\n');
 }
 
-export function generateRingServiceTemplate(state: BellAppState): string {
-  const user = state.hardware.linuxUser || 'pi';
+export interface TemplateRenderOptions {
+  mode?: 'zip' | 'git';
+}
+
+export function generateRingServiceTemplate(state: BellAppState, options: TemplateRenderOptions = {}): string {
+  const user = options.mode === 'git' ? '__CAMPANA_USER__' : state.hardware.linuxUser || 'pi';
   return `[Unit]
 Description=CampanaOS - Ejecución puntual de audio (%i)
 After=sound.target
@@ -112,8 +116,8 @@ Environment=PULSE_RUNTIME_PATH=/run/user/__CAMPANA_UID__/pulse
 `;
 }
 
-export function generateWebServiceUnit(state: BellAppState): string {
-  const user = state.hardware.linuxUser || 'pi';
+export function generateWebServiceUnit(state: BellAppState, options: TemplateRenderOptions = {}): string {
+  const user = options.mode === 'git' ? '__CAMPANA_USER__' : state.hardware.linuxUser || 'pi';
   const port = state.security.webPort || 3000;
   return `[Unit]
 Description=CampanaOS - Panel Web Local y en Red (puerto ${port})
@@ -138,8 +142,8 @@ WantedBy=multi-user.target
 `;
 }
 
-export function generateSudoersRule(state: BellAppState): string {
-  const user = state.hardware.linuxUser || 'pi';
+export function generateSudoersRule(state: BellAppState, options: TemplateRenderOptions = {}): string {
+  const user = options.mode === 'git' ? '__CAMPANA_USER__' : state.hardware.linuxUser || 'pi';
   return `# Permite al panel web local de CampanaOS recargar los systemd timers sin ejecutar Python web como root
 ${user} ALL=(root) NOPASSWD: /usr/bin/python3 /opt/campana-os/sync_timers.py
 `;
@@ -149,8 +153,8 @@ export function generateTimbreRunnerPy(state: BellAppState): string {
   const { hardware } = state;
   return `#!/usr/bin/env python3
 """
-CampanaOS - Ejecutor Puntual de Audio (Python 3.8+, modo systemd .timer)
-Compatible con Ubuntu 20.04/22.04/24.04 y Raspberry Pi OS (arm64/armhf).
+CampanaOS - Ejecutor Puntual de Audio (Python 3.8-3.13+, modo systemd .timer)
+Compatible con Ubuntu 20/22/24 y Raspberry Pi OS Bookworm/Trixie (32-bit armhf / 64-bit arm64).
 Reproductor configurado: ${hardware.audioBackend} (${hardware.audioOutput})
 """
 
@@ -159,6 +163,8 @@ import datetime
 import json
 import logging
 import math
+import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -238,20 +244,99 @@ def synthesize_tone_wav(tone_id: str, preset: Optional[str], target_path: Path) 
         wav_file.writeframes(bytes(frames))
 
 
+def detect_pulse_sink(output_dev: str) -> Optional[str]:
+    """Detecta el sink activo en PipeWire (pipewire-pulse) / PulseAudio evitando HDMI cuando se pide Jack 3.5 mm."""
+    if output_dev == "default" or not shutil.which("pactl"):
+        return None
+    try:
+        res = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=3)
+        if res.returncode != 0:
+            return None
+        sinks: List[str] = []
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                sinks.append(parts[1])
+
+        if output_dev == "hw:0,0":
+            for sink in sinks:
+                low = sink.lower()
+                if "hdmi" not in low and any(k in low for k in ("headphone", "analog", "bcm2835", "lineout")):
+                    return sink
+        elif output_dev == "hdmi":
+            for sink in sinks:
+                if "hdmi" in sink.lower():
+                    return sink
+        elif output_dev == "usb-audio":
+            for sink in sinks:
+                if "usb" in sink.lower():
+                    return sink
+    except Exception:
+        pass
+    return None
+
+
+def detect_alsa_device(output_dev: str) -> Optional[str]:
+    """Resuelve la tarjeta ALSA real en /proc/asound/cards (en Pi 4 Trixie, Headphones suele ser tarjeta 1 o 2)."""
+    if output_dev == "default":
+        return None
+    cards_path = Path("/proc/asound/cards")
+    if cards_path.exists():
+        try:
+            text = cards_path.read_text(encoding="utf-8", errors="ignore")
+            entries: List[tuple] = []
+            for line in text.splitlines():
+                m = re.match(r"^\\s*(\\d+)\\s+\\[([^\\]]+)\\]:\\s*(.*)$", line)
+                if m:
+                    entries.append((m.group(1), m.group(2).strip(), m.group(3).lower()))
+
+            if output_dev == "hw:0,0":
+                for _, card_id, desc in entries:
+                    low_id = card_id.lower()
+                    if "hdmi" in low_id or "hdmi" in desc:
+                        continue
+                    if any(k in low_id or k in desc for k in ("headphone", "bcm2835", "analog", "pch")):
+                        return "plughw:CARD={0},DEV=0".format(card_id)
+                for _, card_id, desc in entries:
+                    if "hdmi" not in card_id.lower() and "hdmi" not in desc:
+                        return "plughw:CARD={0},DEV=0".format(card_id)
+            elif output_dev == "hdmi":
+                for _, card_id, desc in entries:
+                    if "hdmi" in card_id.lower() or "hdmi" in desc:
+                        return "plughw:CARD={0},DEV=0".format(card_id)
+            elif output_dev == "usb-audio":
+                for _, card_id, desc in entries:
+                    if "usb" in card_id.lower() or "usb" in desc:
+                        return "plughw:CARD={0},DEV=0".format(card_id)
+        except Exception:
+            pass
+    return output_dev if output_dev.startswith("hw:") or output_dev.startswith("plughw:") else None
+
+
 def build_player_command(backend: str, volume: int, output_dev: str, audio_path: Path) -> List[str]:
+    pulse_sink = detect_pulse_sink(output_dev)
+    alsa_dev = detect_alsa_device(output_dev)
+
     if backend == "mpv":
         cmd = ["mpv", "--no-video", "--really-quiet", "--volume={0}".format(volume)]
         if output_dev != "default":
-            cmd.append("--audio-device=alsa/{0}".format(output_dev))
+            if pulse_sink:
+                cmd.append("--audio-device=pulse/{0}".format(pulse_sink))
+            elif alsa_dev:
+                cmd.append("--audio-device=alsa/{0}".format(alsa_dev))
         cmd.append(str(audio_path))
         return cmd
     if backend == "paplay":
-        return ["paplay", str(audio_path)]
+        cmd = ["paplay"]
+        if pulse_sink:
+            cmd.extend(["--device", pulse_sink])
+        cmd.append(str(audio_path))
+        return cmd
     if backend == "mpg123":
         return ["mpg123", "-q", str(audio_path)]
     cmd = ["aplay", "-q"]
-    if output_dev != "default":
-        cmd.extend(["-D", output_dev])
+    if alsa_dev:
+        cmd.extend(["-D", alsa_dev])
     cmd.append(str(audio_path))
     return cmd
 
@@ -276,18 +361,39 @@ def play_audio(tone: Dict[str, Any], hardware: Dict[str, Any]) -> None:
         res = subprocess.run(cmd, check=False, timeout=60)
         if res.returncode == 0:
             return
-        logger.warning("El reproductor '%s' devolvió código %s; probando fallback ALSA.", backend, res.returncode)
+        logger.warning("El reproductor '%s' devolvió código %s; probando fallback PipeWire/ALSA.", backend, res.returncode)
     except FileNotFoundError:
-        logger.warning("Reproductor '%s' no encontrado; probando fallback ALSA.", backend)
+        logger.warning("Reproductor '%s' no encontrado; probando fallback PipeWire/ALSA.", backend)
     except Exception as exc:
         logger.warning("Error ejecutando '%s': %s", backend, exc)
 
-    # Fallback automático ALSA para entornos headless sin PulseAudio/PipeWire
+    # Fallback 1: PipeWire / PulseAudio genérico (compartido en Trixie Desktop)
+    try:
+        res_pw = subprocess.run(
+            ["mpv", "--no-video", "--really-quiet", "--ao=pulse", "--volume={0}".format(volume), str(audio_path)],
+            check=False,
+            timeout=60,
+        )
+        if res_pw.returncode == 0:
+            return
+    except Exception:
+        pass
+
+    # Fallback 2: ALSA directo apuntando a la tarjeta resuelta (o default)
+    alsa_dev = detect_alsa_device(output_dev)
     try:
         if audio_path.suffix.lower() == ".wav":
-            subprocess.run(["aplay", "-q", str(audio_path)], check=False, timeout=60)
+            aplay_cmd = ["aplay", "-q"]
+            if alsa_dev:
+                aplay_cmd.extend(["-D", alsa_dev])
+            aplay_cmd.append(str(audio_path))
+            subprocess.run(aplay_cmd, check=False, timeout=60)
         else:
-            subprocess.run(["mpv", "--no-video", "--ao=alsa", "--volume={0}".format(volume), str(audio_path)], check=False, timeout=60)
+            mpv_alsa = ["mpv", "--no-video", "--really-quiet", "--ao=alsa", "--volume={0}".format(volume)]
+            if alsa_dev:
+                mpv_alsa.append("--audio-device=alsa/{0}".format(alsa_dev))
+            mpv_alsa.append(str(audio_path))
+            subprocess.run(mpv_alsa, check=False, timeout=60)
     except Exception as exc:
         logger.error("Fallback ALSA falló: %s", exc)
 
@@ -463,16 +569,48 @@ if __name__ == "__main__":
 `;
 }
 
-export function generateInstallScript(state: BellAppState): string {
-  const user = state.hardware.linuxUser || 'pi';
+export function generateInstallScript(state: BellAppState, options: TemplateRenderOptions = {}): string {
+  const configuredUser = state.hardware.linuxUser || 'pi';
   const mdns = state.security.hostnameMdns || 'campana-escolar';
   const port = state.security.webPort || 3000;
+  const preferSudoUser = options.mode === 'git';
 
   return `#!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+CLI_USER=""
+RESET_CONFIG=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --user)
+      if [[ $# -lt 2 || -z "\${2:-}" ]]; then
+        echo "Error: --user requiere un nombre de usuario Linux."
+        exit 1
+      fi
+      CLI_USER="$2"
+      shift 2
+      ;;
+    --reset-config)
+      RESET_CONFIG=1
+      shift
+      ;;
+    -h|--help)
+      echo "Uso: sudo bash install.sh [--user <usuario>] [--reset-config]"
+      echo "  --user <usuario>  Especifica manualmente el usuario Linux del servicio"
+      echo "  --reset-config    Sobrescribe schedule.json existente con la configuración base"
+      exit 0
+      ;;
+    *)
+      echo "Opción no reconocida: $1 (usa --help para ver las opciones)"
+      exit 1
+      ;;
+  esac
+done
+
 echo "=================================================================="
-echo " Instalador CampanaOS - Ubuntu 20/22/24 y Raspberry Pi OS"
+echo " Instalador CampanaOS - Raspberry Pi OS Trixie/Bookworm y Ubuntu"
 echo " Centro: ${state.hardware.schoolName}"
 echo "=================================================================="
 
@@ -481,30 +619,54 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-INSTALL_DIR="/opt/campana-os"
-TARGET_USER="${user}"
+if [[ -f "$SCRIPT_DIR/deploy/timbre_runner.py" ]]; then
+  SRC_DIR="$SCRIPT_DIR/deploy"
+  SOURCE_LABEL="Repositorio Git ($SRC_DIR)"
+else
+  SRC_DIR="$SCRIPT_DIR"
+  SOURCE_LABEL="Paquete local ($SRC_DIR)"
+fi
 
-if ! id "$TARGET_USER" &>/dev/null; then
-  echo "El usuario '$TARGET_USER' no existe en este equipo."
-  echo "Cambia 'Usuario Linux' en CampanaOS o crea el usuario antes de instalar."
+INSTALL_DIR="/opt/campana-os"
+TARGET_USER=""
+
+if [[ -n "$CLI_USER" ]]; then
+  TARGET_USER="$CLI_USER"
+elif [[ "${preferSudoUser ? '1' : '0'}" -eq 1 || "$SRC_DIR" == "$SCRIPT_DIR/deploy" ]]; then
+  if [[ -n "\${SUDO_USER:-}" && "\${SUDO_USER:-}" != "root" ]] && id "$SUDO_USER" &>/dev/null; then
+    TARGET_USER="$SUDO_USER"
+  elif id "pi" &>/dev/null; then
+    TARGET_USER="pi"
+  else
+    TARGET_USER=$(awk -F: '$3 >= 1000 && $3 < 65534 {print $1; exit}' /etc/passwd || true)
+  fi
+else
+  TARGET_USER="${configuredUser}"
+fi
+
+if [[ -z "$TARGET_USER" ]] || ! id "$TARGET_USER" &>/dev/null; then
+  echo "No se pudo determinar un usuario Linux válido ('$TARGET_USER')."
+  echo "Ejecuta: sudo bash install.sh --user <tu-usuario-linux>"
   exit 1
 fi
 
 TARGET_UID=$(id -u "$TARGET_USER")
-echo "[1/6] Usuario detectado: $TARGET_USER (UID $TARGET_UID) · Arquitectura: $(uname -m)"
+PY_VER=$(python3 -c 'import sys; print("{0}.{1}".format(*sys.version_info[:2]))' 2>/dev/null || echo "3.x")
+echo "[1/6] Origen: $SOURCE_LABEL"
+echo "      Usuario: $TARGET_USER (UID $TARGET_UID) · Arch: $(uname -m) · Python $PY_VER"
 
-echo "[2/6] Instalando paquetes de audio, ffmpeg, yt-dlp y red local (sin Node.js)..."
+echo "[2/6] Instalando paquetes de audio PipeWire/ALSA, ffmpeg y red local (sin Node.js ni pip global)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y python3 mpv ffmpeg curl ca-certificates alsa-utils avahi-daemon dbus-user-session
 
-for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse; do
+for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse wireplumber; do
   if apt-cache show "$opt_pkg" >/dev/null 2>&1; then
     apt-get install -y "$opt_pkg" || true
   fi
 done
 
-echo "[2b/6] Instalando herramienta libre yt-dlp (compatible Ubuntu 20/22/24 y RPi OS armhf/arm64)..."
+echo "[2b/6] Instalando herramienta libre yt-dlp (compatible Python 3.8-3.13 y RPi OS Trixie 32-bit armhf)..."
 if curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o /usr/local/bin/yt-dlp; then
   chmod a+rx /usr/local/bin/yt-dlp
 elif apt-cache show yt-dlp >/dev/null 2>&1; then
@@ -513,27 +675,45 @@ else
   echo "Aviso: no se pudo descargar yt-dlp ahora; la importación desde YouTube requerirá instalar yt-dlp manualmente."
 fi
 
-echo "[3/6] Configurando permisos de audio y sesión headless (linger)..."
+echo "[3/6] Configurando permisos de audio y sesión PipeWire headless (linger)..."
 usermod -aG audio "$TARGET_USER" || true
 loginctl enable-linger "$TARGET_USER" || true
 
-echo "[4/6] Copiando scripts, interfaz web y audios a $INSTALL_DIR..."
+echo "[4/6] Copiando scripts e interfaz web a $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR/audio" "$INSTALL_DIR/webapp"
-cp -f timbre_runner.py sync_timers.py web_panel.py schedule.json "$INSTALL_DIR/"
-if [ -d "./webapp" ]; then
-  rm -rf "$INSTALL_DIR/webapp"/*
-  cp -rf ./webapp/* "$INSTALL_DIR/webapp/"
+cp -f "$SRC_DIR/timbre_runner.py" "$SRC_DIR/sync_timers.py" "$SRC_DIR/web_panel.py" "$INSTALL_DIR/"
+
+if [[ -f "$INSTALL_DIR/schedule.json" && "$RESET_CONFIG" -eq 0 ]]; then
+  echo "      -> Actualización detectada: conservando schedule.json, auth-secrets.json y audio/ existentes."
+else
+  cp -f "$SRC_DIR/schedule.json" "$INSTALL_DIR/schedule.json"
+  python3 - "$INSTALL_DIR/schedule.json" "$TARGET_USER" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+target_user = sys.argv[2]
+data = json.loads(cfg_path.read_text(encoding="utf-8"))
+data.setdefault("hardware", {})["linuxUser"] = target_user
+cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+PYEOF
+  if [[ -d "$SRC_DIR/audio" ]]; then
+    cp -rf "$SRC_DIR/audio/"* "$INSTALL_DIR/audio/" 2>/dev/null || true
+  fi
 fi
-if [ -d "./audio" ]; then
-  cp -rf ./audio/* "$INSTALL_DIR/audio/" 2>/dev/null || true
+
+if [[ -d "$SRC_DIR/webapp" ]]; then
+  rm -rf "$INSTALL_DIR/webapp"/*
+  cp -rf "$SRC_DIR/webapp/"* "$INSTALL_DIR/webapp/"
 fi
 chmod 755 "$INSTALL_DIR/timbre_runner.py" "$INSTALL_DIR/sync_timers.py" "$INSTALL_DIR/web_panel.py"
 chown -R "$TARGET_USER":"$TARGET_USER" "$INSTALL_DIR"
 
-echo "[5/6] Instalando unidades systemd (UID dinámico $TARGET_UID) y sudoers..."
-sed "s/__CAMPANA_UID__/$TARGET_UID/g" campana-ring@.service > /etc/systemd/system/campana-ring@.service
-sed "s/__CAMPANA_UID__/$TARGET_UID/g" campana-web.service > /etc/systemd/system/campana-web.service
-cp -f campana-os.sudoers /etc/sudoers.d/campana-os
+echo "[5/6] Instalando unidades systemd ($TARGET_USER / UID $TARGET_UID) y sudoers..."
+sed -e "s/__CAMPANA_USER__/$TARGET_USER/g" -e "s/__CAMPANA_UID__/$TARGET_UID/g" "$SRC_DIR/campana-ring@.service" > /etc/systemd/system/campana-ring@.service
+sed -e "s/__CAMPANA_USER__/$TARGET_USER/g" -e "s/__CAMPANA_UID__/$TARGET_UID/g" "$SRC_DIR/campana-web.service" > /etc/systemd/system/campana-web.service
+sed -e "s/__CAMPANA_USER__/$TARGET_USER/g" "$SRC_DIR/campana-os.sudoers" > /etc/sudoers.d/campana-os
 chmod 440 /etc/sudoers.d/campana-os
 if command -v visudo >/dev/null 2>&1; then
   visudo -cf /etc/sudoers.d/campana-os
@@ -543,10 +723,18 @@ echo "[6/6] Activando Avahi mDNS, timers systemd y panel web..."
 systemctl enable --now avahi-daemon || true
 python3 "$INSTALL_DIR/sync_timers.py"
 systemctl daemon-reload
-systemctl enable --now campana-web.service
+if systemctl is-active --quiet campana-web.service; then
+  systemctl enable campana-web.service >/dev/null 2>&1 || true
+  systemctl restart campana-web.service
+else
+  systemctl enable --now campana-web.service
+fi
 
 echo ""
-echo "Instalación completada con éxito."
+echo "Tarjetas de audio detectadas en el sistema:"
+aplay -l 2>/dev/null | grep -E '^card ' || true
+echo ""
+echo "Instalación/actualización completada con éxito."
 echo "Panel local:          http://localhost:${port}"
 echo "Panel en red local:   http://${mdns}.local:${port} (o http://$(hostname -I | awk '{print $1}'):${port})"
 echo "Ver próximos toques:  systemctl list-timers 'campana-ring-*'"
@@ -567,18 +755,30 @@ Acceso en red local: **http://${mdns}.local:${port}**
 
 ## 1. Compatibilidad verificada
 
+- **Raspberry Pi OS**: **Trixie (Debian 13)** y **Bookworm (Debian 12)** en **32-bit (\`armhf\`)** y **64-bit (\`arm64\`)**, optimizado para PipeWire y salidas \`Headphones\`.
 - **Ubuntu Desktop / Server**: 20.04 LTS, 22.04 LTS y 24.04 LTS (\`x86_64\` / \`arm64\`).
-- **Raspberry Pi OS**: 32-bit (\`armhf\`) y 64-bit (\`arm64\`).
-- **Cero dependencias Node.js en el equipo destino**: tanto el ejecutor de audio como el servidor web local funcionan íntegramente con Python 3 estándar (\`3.8+\`).
+- **Python 3.8 – 3.13+ sin Node.js ni \`pip\` global**: compatible con PEP 668 (Debian 12/13 y Ubuntu 24.04); tanto el ejecutor de audio como el servidor web usan Python 3 estándar.
 
 ## 2. Cómo se conecta al ecualizador del centro
 
-1. Conecta un cable de audio desde la salida **Jack 3.5 mm**, **HDMI** o **tarjeta USB** del PC Linux / Raspberry Pi hacia la entrada de línea (AUX / LINE IN) de tu **ecualizador o etapa de megafonía**.
-2. Cada toque programado ejecuta una unidad \`systemd .timer\` puntual (\`OnCalendar=\`, \`AccuracySec=1s\`, \`Persistent=false\`) que dispara \`timbre_runner.py\`, validando festivos y perfil activo antes de reproducir el sonido.
-3. El panel web local (\`campana-web.service\`) permite editar horarios, gestionar festivos, subir archivos MP3/WAV, importar audios desde enlace o YouTube (\`yt-dlp\` + \`ffmpeg\`) o pulsar **Tocar timbre ahora** desde el propio equipo o desde cualquier PC de la red local.
+1. Conecta un cable de audio desde la salida **Jack 3.5 mm** (Raspberry Pi 3/4), **HDMI** o **tarjeta de sonido USB** (necesaria en Raspberry Pi 5 al no incluir Jack analógico) hacia la entrada de línea (AUX / LINE IN) de tu **ecualizador o etapa de megafonía**.
+2. En **Raspberry Pi 4 con Trixie**, el vídeo HDMI suele ocupar la tarjeta \`hw:0,0\`. Si seleccionas **Jack 3.5 mm**, \`timbre_runner.py\` autodetecta automáticamente el *sink* analógico \`Headphones\` en **PipeWire** (o \`plughw:CARD=Headphones,DEV=0\` en ALSA) sin interferir con el escritorio.
+3. Cada toque programado ejecuta una unidad \`systemd .timer\` puntual (\`OnCalendar=\`, \`AccuracySec=1s\`, \`Persistent=false\`) que dispara \`timbre_runner.py\`, validando festivos y perfil activo antes de reproducir el sonido.
+4. El panel web local (\`campana-web.service\`) permite editar horarios, gestionar festivos, subir archivos MP3/WAV, importar audios desde enlace o YouTube (\`yt-dlp\` + \`ffmpeg\`) o pulsar **Tocar timbre ahora** desde el propio equipo o desde cualquier PC de la red local.
 
 ## 3. Instalación rápida
 
+### Opción A: Desde GitHub (\`git clone\` + actualización \`git pull\`)
+\`\`\`bash
+git clone <URL-DEL-REPOSITORIO> campana-os
+cd campana-os
+sudo bash install.sh
+
+# Para actualizar más adelante conservando horarios, PIN y audios:
+git pull && sudo bash install.sh
+\`\`\`
+
+### Opción B: Desde paquete \`.zip\` descargado
 \`\`\`bash
 unzip campana-os-linux-rpi.zip -d campana-os
 cd campana-os
@@ -597,6 +797,9 @@ sudo systemctl restart avahi-daemon
 \`\`\`bash
 # Ver próximos timbres programados
 systemctl list-timers 'campana-ring-*'
+
+# Ver salidas PipeWire y tarjetas ALSA detectadas
+pactl list short sinks || aplay -l
 
 # Ver estado del panel web local
 sudo systemctl status campana-web

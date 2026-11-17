@@ -1,0 +1,13 @@
+[Unit]
+Description=CampanaOS - Ejecución puntual de audio (%i)
+After=sound.target
+
+[Service]
+Type=oneshot
+User=__CAMPANA_USER__
+WorkingDirectory=/opt/campana-os
+ExecStart=/usr/bin/python3 /opt/campana-os/timbre_runner.py --schedule-id %i
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_RUNTIME_DIR=/run/user/__CAMPANA_UID__
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/__CAMPANA_UID__/bus
+Environment=PULSE_RUNTIME_PATH=/run/user/__CAMPANA_UID__/pulse

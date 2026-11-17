@@ -1,7 +1,8 @@
 export function generateWebPanelPy(): string {
   return `#!/usr/bin/env python3
 """
-CampanaOS - Servidor Web Local y en Red (Python 3.8+ stdlib, sin Node.js)
+CampanaOS - Servidor Web Local y en Red (Python 3.8-3.13+ stdlib, sin Node.js ni pip)
+Compatible con Ubuntu 20/22/24 y Raspberry Pi OS Bookworm/Trixie (arm64/armhf).
 Sirve la interfaz web compilada desde /opt/campana-os/webapp, gestiona
 schedule.json, auth-secrets.json, archivos de audio, disparo manual en el
 equipo anfitrión y sincronización de systemd .timer.
@@ -146,7 +147,7 @@ def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
 
 
 def now_iso() -> str:
-    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def load_secrets() -> Dict[str, Any]:
@@ -190,7 +191,7 @@ def verify_pin(pin: str, sec: Dict[str, Any]) -> bool:
 
 
 def sign_session(secret_hex: str) -> str:
-    expires = int(datetime.datetime.utcnow().timestamp() * 1000) + 7 * 24 * 3600 * 1000
+    expires = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000) + 7 * 24 * 3600 * 1000
     nonce = secrets.token_hex(8)
     payload = "{0}.{1}".format(expires, nonce)
     sig = hmac.new(secret_hex.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -208,7 +209,7 @@ def verify_session(token: Optional[str], secret_hex: str) -> bool:
         expires_ms = int(expires_str)
     except ValueError:
         return False
-    now_ms = int(datetime.datetime.utcnow().timestamp() * 1000)
+    now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
     if now_ms > expires_ms:
         return False
     payload = "{0}.{1}".format(expires_str, nonce)

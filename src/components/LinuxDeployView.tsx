@@ -34,6 +34,7 @@ type InspectFileKey =
 
 export function LinuxDeployView({ state, onDownloadZip, onSyncTimers }: LinuxDeployViewProps) {
   const [activeFile, setActiveFile] = useState<InspectFileKey>('install');
+  const [installMethod, setInstallMethod] = useState<'git' | 'zip'>('git');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
@@ -44,7 +45,7 @@ export function LinuxDeployView({ state, onDownloadZip, onSyncTimers }: LinuxDep
     install: {
       label: 'install.sh',
       filename: 'install.sh',
-      content: generateInstallScript(state),
+      content: generateInstallScript(state, { mode: installMethod }),
     },
     timers: {
       label: 'campana-ring-*.timer',
@@ -54,7 +55,7 @@ export function LinuxDeployView({ state, onDownloadZip, onSyncTimers }: LinuxDep
     ringService: {
       label: 'campana-ring@.service',
       filename: 'campana-ring@.service',
-      content: generateRingServiceTemplate(state),
+      content: generateRingServiceTemplate(state, { mode: installMethod }),
     },
     runner: {
       label: 'timbre_runner.py',
@@ -74,12 +75,12 @@ export function LinuxDeployView({ state, onDownloadZip, onSyncTimers }: LinuxDep
     webService: {
       label: 'campana-web.service',
       filename: 'campana-web.service',
-      content: generateWebServiceUnit(state),
+      content: generateWebServiceUnit(state, { mode: installMethod }),
     },
     sudoers: {
       label: 'campana-os.sudoers',
       filename: 'campana-os.sudoers',
-      content: generateSudoersRule(state),
+      content: generateSudoersRule(state, { mode: installMethod }),
     },
     schedule: {
       label: 'schedule.json',
@@ -93,10 +94,19 @@ export function LinuxDeployView({ state, onDownloadZip, onSyncTimers }: LinuxDep
     },
   };
 
-  const quickCommands = `unzip campana-os-linux-rpi.zip -d campana-os
+  const gitCommands = `git clone <URL-DE-TU-REPOSITORIO> campana-os
+cd campana-os
+sudo bash install.sh
+
+# Para actualizar tras un git pull conservando horarios, PIN y audios:
+git pull && sudo bash install.sh`;
+
+  const zipCommands = `unzip campana-os-linux-rpi.zip -d campana-os
 cd campana-os
 sudo bash install.sh
 systemctl list-timers 'campana-ring-*'`;
+
+  const quickCommands = installMethod === 'git' ? gitCommands : zipCommands;
 
   const copyText = async (id: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -120,7 +130,7 @@ systemctl list-timers 'campana-ring-*'`;
             Despliegue Linux y Raspberry Pi (systemd .timer + Web Local)
           </h1>
           <p className="text-sm text-slate-500">
-            Paquete autónomo en Python 3 (sin Node.js) compatible con Ubuntu 20.04, 22.04, 24.04 y Raspberry Pi OS (arm64 / armhf).
+            Paquete autónomo en Python 3.8–3.13 (sin Node.js ni pip) compatible con Ubuntu 20/22/24 y Raspberry Pi OS Trixie/Bookworm (32 bits armhf y 64 bits arm64).
           </p>
         </div>
 
@@ -174,41 +184,72 @@ systemctl list-timers 'campana-ring-*'`;
         <div className="space-y-1 md:border-l md:border-slate-200 md:pl-6">
           <div className="text-xs font-medium text-slate-500">Compatibilidad y Audio Headless</div>
           <div className="text-sm font-semibold text-slate-900">
-            Ubuntu 20/22/24 · RPi OS arm64/armhf
+            RPi OS Trixie/Bookworm (32/64-bit) · Ubuntu 20/22/24
           </div>
           <div className="text-xs text-slate-500">
-            Configura <span className="font-mono">linger</span>, UID dinámico y fallback ALSA/PipeWire/PulseAudio.
+            Python 3.8–3.13 · Configura <span className="font-mono">linger</span> y autodetección PipeWire/ALSA para Jack 3.5 mm.
           </div>
         </div>
       </section>
 
       {/* Quick Start Terminal Box */}
       <section className="rounded-xl bg-slate-900 text-white p-6 border border-slate-800 space-y-4">
-        <div className="flex items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-2.5">
             <Terminal className="w-5 h-5 text-emerald-400" />
             <div>
               <h2 className="text-sm font-semibold text-white">
-                Instalación en el equipo anfitrión (Ubuntu 20/22/24 o Raspberry Pi OS)
+                Instalación en el equipo anfitrión (Raspberry Pi OS Trixie/Bookworm o Ubuntu)
               </h2>
               <p className="text-xs text-slate-400">
-                Usuario <span className="font-mono text-slate-200">{state.hardware.linuxUser}</span>
-                <span aria-hidden="true"> · </span>
-                Reproductor <span className="font-mono text-slate-200">{state.hardware.audioBackend}</span>
-                <span aria-hidden="true"> · </span>
-                Salida <span className="font-mono text-slate-200">{state.hardware.audioOutput}</span>
+                {installMethod === 'git' ? (
+                  <>
+                    Detecta <span className="font-mono text-slate-200">$SUDO_USER</span> automáticamente y conserva horarios, PIN y audios al actualizar
+                  </>
+                ) : (
+                  <>
+                    Usuario <span className="font-mono text-slate-200">{state.hardware.linuxUser}</span>
+                    <span aria-hidden="true"> · </span>
+                    Reproductor <span className="font-mono text-slate-200">{state.hardware.audioBackend}</span>
+                    <span aria-hidden="true"> · </span>
+                    Salida <span className="font-mono text-slate-200">{state.hardware.audioOutput}</span>
+                  </>
+                )}
               </p>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => void copyText('cmd', quickCommands)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {copiedId === 'cmd' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            {copiedId === 'cmd' ? 'Copiado' : 'Copiar comandos'}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-lg border border-slate-700 bg-slate-950 p-0.5">
+              <button
+                type="button"
+                onClick={() => setInstallMethod('git')}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  installMethod === 'git' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                GitHub (git clone)
+              </button>
+              <button
+                type="button"
+                onClick={() => setInstallMethod('zip')}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  installMethod === 'zip' ? 'bg-slate-800 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Paquete (.zip)
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void copyText('cmd', quickCommands)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {copiedId === 'cmd' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedId === 'cmd' ? 'Copiado' : 'Copiar comandos'}
+            </button>
+          </div>
         </div>
 
         <pre className="p-4 rounded-lg bg-slate-950 border border-slate-800 font-mono text-xs text-emerald-300 overflow-x-auto leading-relaxed">

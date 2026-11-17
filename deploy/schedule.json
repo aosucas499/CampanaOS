@@ -1,0 +1,359 @@
+{
+  "schoolName": "I.E.S. Sierra Norte",
+  "activeProfileId": "prof-normal",
+  "hardware": {
+    "schoolName": "I.E.S. Sierra Norte",
+    "linuxUser": "pi",
+    "audioBackend": "mpv",
+    "audioOutput": "default",
+    "masterVolume": 85,
+    "timezone": "Europe/Madrid"
+  },
+  "security": {
+    "authEnabled": false,
+    "hasAdminPin": false,
+    "lockReadOnlyPreview": false,
+    "hostnameMdns": "campana-escolar",
+    "webPort": 3000
+  },
+  "network": {
+    "hostnameMdns": "campana-escolar",
+    "webPort": 3000
+  },
+  "profiles": [
+    {
+      "id": "prof-normal",
+      "name": "Horario Lectivo Normal",
+      "description": "Jornada escolar ordinaria de lunes a viernes con 6 periodos y recreo de 30 min.",
+      "isSilent": false
+    },
+    {
+      "id": "prof-exams",
+      "name": "Semana de Exámenes",
+      "description": "Bloques de evaluación extendidos de 90 minutos sin timbre intermedio.",
+      "isSilent": false
+    },
+    {
+      "id": "prof-intensive",
+      "name": "Jornada Intensiva (Jun/Sep)",
+      "description": "Horario reducido de mañana de 08:30 a 13:30.",
+      "isSilent": false
+    },
+    {
+      "id": "prof-silent",
+      "name": "Modo Silencio (Vacaciones)",
+      "description": "Desactiva temporalmente todos los toques automáticos manteniendo el sistema activo.",
+      "isSilent": true
+    }
+  ],
+  "holidays": [
+    {
+      "id": "hol-1",
+      "name": "Día de la Constitución e Inmaculada",
+      "startDate": "2026-12-06",
+      "endDate": "2026-12-08"
+    },
+    {
+      "id": "hol-2",
+      "name": "Vacaciones de Navidad",
+      "startDate": "2026-12-23",
+      "endDate": "2027-01-07"
+    },
+    {
+      "id": "hol-3",
+      "name": "Día del Trabajo",
+      "startDate": "2027-05-01",
+      "endDate": "2027-05-01"
+    }
+  ],
+  "schedules": [
+    {
+      "id": "sch-1",
+      "profileId": "prof-normal",
+      "time": "08:15",
+      "label": "Entrada y 1ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    },
+    {
+      "id": "sch-2",
+      "profileId": "prof-normal",
+      "time": "09:15",
+      "label": "Cambio a 2ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "soft-chime",
+      "enabled": true
+    },
+    {
+      "id": "sch-3",
+      "profileId": "prof-normal",
+      "time": "10:15",
+      "label": "Cambio a 3ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "soft-chime",
+      "enabled": true
+    },
+    {
+      "id": "sch-4",
+      "profileId": "prof-normal",
+      "time": "11:15",
+      "label": "Inicio de Recreo",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "recess-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-5",
+      "profileId": "prof-normal",
+      "time": "11:45",
+      "label": "Fin de Recreo y 4ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "classic-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-6",
+      "profileId": "prof-normal",
+      "time": "12:45",
+      "label": "Cambio a 5ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "soft-chime",
+      "enabled": true
+    },
+    {
+      "id": "sch-7",
+      "profileId": "prof-normal",
+      "time": "13:45",
+      "label": "Cambio a 6ª Hora",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "soft-chime",
+      "enabled": true
+    },
+    {
+      "id": "sch-8",
+      "profileId": "prof-normal",
+      "time": "14:45",
+      "label": "Salida General",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    },
+    {
+      "id": "sch-ex-1",
+      "profileId": "prof-exams",
+      "time": "08:30",
+      "label": "Inicio Bloque 1 Evaluación",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    },
+    {
+      "id": "sch-ex-2",
+      "profileId": "prof-exams",
+      "time": "10:00",
+      "label": "Fin Bloque 1 / Descanso",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "recess-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-ex-3",
+      "profileId": "prof-exams",
+      "time": "10:30",
+      "label": "Inicio Bloque 2 Evaluación",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    },
+    {
+      "id": "sch-ex-4",
+      "profileId": "prof-exams",
+      "time": "12:00",
+      "label": "Fin de Jornada de Exámenes",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "classic-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-int-1",
+      "profileId": "prof-intensive",
+      "time": "08:30",
+      "label": "Entrada Jornada Intensiva",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    },
+    {
+      "id": "sch-int-2",
+      "profileId": "prof-intensive",
+      "time": "10:45",
+      "label": "Recreo Jornada Intensiva",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "recess-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-int-3",
+      "profileId": "prof-intensive",
+      "time": "11:15",
+      "label": "Regreso de Recreo",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "classic-bell",
+      "enabled": true
+    },
+    {
+      "id": "sch-int-4",
+      "profileId": "prof-intensive",
+      "time": "13:30",
+      "label": "Salida Jornada Intensiva",
+      "days": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "toneId": "westminster",
+      "enabled": true
+    }
+  ],
+  "tones": [
+    {
+      "id": "classic-bell",
+      "name": "Timbre Clásico Escolar",
+      "category": "built-in",
+      "description": "Timbre tradicional nítido para entradas y salidas de clase.",
+      "durationSec": 3.5,
+      "synthPreset": "classic-bell",
+      "fileName": "classic-bell.wav"
+    },
+    {
+      "id": "westminster",
+      "name": "Carrillón Westminster",
+      "category": "built-in",
+      "description": "Secuencia armónica de 4 notas tubulares para inicio y fin de jornada.",
+      "durationSec": 6.5,
+      "synthPreset": "westminster",
+      "fileName": "westminster.wav"
+    },
+    {
+      "id": "soft-chime",
+      "name": "Melodía Suave Inclusiva",
+      "category": "built-in",
+      "description": "Arpegio cálido de baja estridencia recomendado para aulas TEA.",
+      "durationSec": 3,
+      "synthPreset": "soft-chime",
+      "fileName": "soft-chime.wav"
+    },
+    {
+      "id": "recess-bell",
+      "name": "Aviso Dual de Recreo",
+      "category": "built-in",
+      "description": "Doble campana armónica para inicio y fin de patio.",
+      "durationSec": 2.2,
+      "synthPreset": "recess-bell",
+      "fileName": "recess-bell.wav"
+    },
+    {
+      "id": "evacuation",
+      "name": "Sirena de Evacuación",
+      "category": "built-in",
+      "description": "Señal acústica modulada reservada para simulacros y emergencias.",
+      "durationSec": 4.8,
+      "synthPreset": "evacuation",
+      "fileName": "evacuation.wav"
+    }
+  ],
+  "logs": []
+}
