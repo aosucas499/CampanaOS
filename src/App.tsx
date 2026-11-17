@@ -328,6 +328,38 @@ export default function App() {
     }
   };
 
+  const handleUploadYoutubeCookies = async (
+    cookiesText: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const res = await fetch('/api/tones/youtube-cookies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookiesText }),
+      });
+      if (res.status === 401) {
+        setShowUnlockModal(true);
+        return { ok: false, error: 'Se requiere desbloquear con el PIN de administrador.' };
+      }
+      const data = (await res.json()) as { state?: BellAppState; error?: string };
+      if (!res.ok || !data.state) {
+        return { ok: false, error: data.error ?? 'No se pudo guardar el archivo cookies.txt.' };
+      }
+      setState(data.state);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Error de conexión al guardar cookies.txt.' };
+    }
+  };
+
+  const handleClearYoutubeCookies = async () => {
+    const res = await fetch('/api/tones/youtube-cookies', { method: 'DELETE' });
+    if (await handleProtectedResponse(res)) {
+      const data = (await res.json()) as { state: BellAppState };
+      setState(data.state);
+    }
+  };
+
   const handleDeleteTone = async (id: string) => {
     const res = await fetch(`/api/tones/${id}`, { method: 'DELETE' });
     if (await handleProtectedResponse(res)) {
@@ -665,6 +697,8 @@ export default function App() {
                   onStopAudio={() => bellAudio.stop()}
                   onUploadTone={handleUploadTone}
                   onImportToneFromUrl={handleImportToneFromUrl}
+                  onUploadYoutubeCookies={handleUploadYoutubeCookies}
+                  onClearYoutubeCookies={handleClearYoutubeCookies}
                   onDeleteTone={handleDeleteTone}
                   onExportBackup={handleExportBackup}
                   onImportBackup={handleImportBackup}

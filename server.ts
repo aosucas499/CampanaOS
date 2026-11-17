@@ -64,6 +64,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 const STATE_FILE = path.join(DATA_DIR, 'school-bell.json');
 const SECRETS_FILE = path.join(DATA_DIR, 'auth-secrets.json');
+const YOUTUBE_COOKIES_FILE = path.join(DATA_DIR, 'youtube-cookies.txt');
 const DIST_DIR = path.join(__dirname, 'dist');
 const OPT_SYNC_SCRIPT = '/opt/campana-os/sync_timers.py';
 const OPT_SCHEDULE_FILE = '/opt/campana-os/schedule.json';
@@ -392,7 +393,31 @@ function isRequestAuthenticated(req: Request): boolean {
   return verifySessionToken(cookies[SESSION_COOKIE_NAME], secrets.sessionSecret);
 }
 
+function detectLanIps(): string[] {
+  const ips: string[] = [];
+  const ifaces = os.networkInterfaces();
+  for (const entries of Object.values(ifaces)) {
+    if (!entries) continue;
+    for (const info of entries) {
+      if (info.family === 'IPv4' && !info.internal && info.address) {
+        if (!ips.includes(info.address)) ips.push(info.address);
+      }
+    }
+  }
+  return ips.slice(0, 4);
+}
+
+function hasYoutubeCookiesFile(): boolean {
+  try {
+    return fs.existsSync(YOUTUBE_COOKIES_FILE) && fs.statSync(YOUTUBE_COOKIES_FILE).size > 0;
+  } catch {
+    return false;
+  }
+}
+
 function buildClientState(authenticated: boolean): BellAppState {
+  const lanIps = detectLanIps();
+  const hasYoutubeCookies = hasYoutubeCookiesFile();
   if (state.security.authEnabled && state.security.lockReadOnlyPreview && !authenticated) {
     return {
       activeProfileId: state.activeProfileId,
@@ -416,6 +441,8 @@ function buildClientState(authenticated: boolean): BellAppState {
       },
       authenticated: false,
       locked: true,
+      lanIps,
+      hasYoutubeCookies,
       logs: [],
       serverTimeIso: new Date().toISOString(),
     };
@@ -429,6 +456,8 @@ function buildClientState(authenticated: boolean): BellAppState {
     },
     authenticated,
     locked: false,
+    lanIps,
+    hasYoutubeCookies,
     serverTimeIso: new Date().toISOString(),
   };
 }
@@ -476,7 +505,7 @@ async function startServer() {
     res.json({ authenticated: !state.security.authEnabled, state: buildClientState(!state.security.authEnabled) });
   });
 
-  app.put('/api/security', requireAdminAuth, (req, res) => {
+  app.put('/api/security', requireAdminAuth, async (req, res) => {
     const {
       authEnabled,
       newPin,
@@ -534,6 +563,9 @@ async function startServer() {
     };
 
     saveState(state);
+    if (fs.existsSync(OPT_SYNC_SCRIPT)) {
+      await syncSystemdTimersIfInstalled(state);
+    }
 
     if (state.security.authEnabled) {
       const token = signSessionToken(secrets.sessionSecret);
@@ -780,8 +812,29 @@ async function startServer() {
 
     // YouTube or web media page -> yt-dlp + ffmpeg
     const localYtDlp = path.join(DATA_DIR, 'bin', 'yt-dlp');
+    const downloadLatestYtDlp = async (): Promise<string | null> => {
+      try {
+        const dl = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp', {
+          redirect: 'follow',
+          signal: AbortSignal.timeout(30000),
+        });
+        if (dl.ok) {
+          const buf = Buffer.from(await dl.arrayBuffer());
+          if (buf.length > 100000) {
+            fs.mkdirSync(path.dirname(localYtDlp), { recursive: true });
+            fs.writeFileSync(localYtDlp, buf);
+            fs.chmodSync(localYtDlp, 0o755);
+            return localYtDlp;
+          }
+        }
+      } catch {
+        // Ignore download failure
+      }
+      return null;
+    };
+
     let ytDlpBin: string | null = null;
-    for (const candidate of ['/usr/local/bin/yt-dlp', localYtDlp]) {
+    for (const candidate of [localYtDlp, '/usr/local/bin/yt-dlp']) {
       if (fs.existsSync(candidate)) {
         ytDlpBin = candidate;
         break;
@@ -796,20 +849,7 @@ async function startServer() {
       }
     }
     if (!ytDlpBin) {
-      try {
-        const dl = await fetch('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp', {
-          redirect: 'follow',
-          signal: AbortSignal.timeout(30000),
-        });
-        if (dl.ok) {
-          fs.mkdirSync(path.dirname(localYtDlp), { recursive: true });
-          fs.writeFileSync(localYtDlp, Buffer.from(await dl.arrayBuffer()));
-          fs.chmodSync(localYtDlp, 0o755);
-          ytDlpBin = localYtDlp;
-        }
-      } catch {
-        // Ignore download failure; handled below
-      }
+      ytDlpBin = await downloadLatestYtDlp();
     }
 
     if (!ytDlpBin) {
@@ -829,24 +869,56 @@ async function startServer() {
       return;
     }
 
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campana-yt-'));
-    try {
+    const jsRuntimeArgs: string[] = [];
+    for (const runtime of ['deno', 'node', 'nodejs'] as const) {
+      try {
+        const { stdout } = await execFileAsync('which', [runtime]);
+        const binPath = stdout.trim();
+        if (binPath) {
+          jsRuntimeArgs.push('--js-runtimes', `${runtime === 'nodejs' ? 'node' : runtime}:${binPath}`);
+          break;
+        }
+      } catch {
+        // Not available
+      }
+    }
+
+    const hasCookies = hasYoutubeCookiesFile();
+    const cookieArgs = hasCookies ? ['--cookies', YOUTUBE_COOKIES_FILE] : [];
+    const isYouTube = /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/i.test(parsedUrl.hostname);
+
+    const strategies: string[][] = isYouTube
+      ? [
+          ['--extractor-args', 'youtube:player_client=android_vr,tv'],
+          ['--extractor-args', 'youtube:player_client=tv,web_safari'],
+          ['--extractor-args', 'youtube:player_client=mweb,ios'],
+          [],
+        ]
+      : [[]];
+
+    const runYtDlp = async (binPath: string, extraArgs: string[], tmpDir: string) => {
       const outTpl = path.join(tmpDir, '%(id)s.%(ext)s');
-      const { stdout } = await execFileAsync(
-        ytDlpBin,
+      return execFileAsync(
+        binPath,
         [
+          '--force-ipv4',
+          '--ignore-config',
           '--no-playlist',
           '--no-warnings',
+          '--no-check-certificates',
+          '-f',
+          'bestaudio/best',
           '--match-filter',
-          'duration <= 900',
-          '--max-filesize',
-          '25M',
+          'duration <= 1800',
           '--extract-audio',
           '--audio-format',
           'mp3',
           '--audio-quality',
           '192K',
           '--print-json',
+          ...jsRuntimeArgs,
+          ...cookieArgs,
+          ...extraArgs,
           '-o',
           outTpl,
           '--',
@@ -854,6 +926,89 @@ async function startServer() {
         ],
         { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }
       );
+    };
+
+    const formatYtDlpError = (rawStderr: string): string => {
+      const lines = rawStderr
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const errLines = lines.filter((l) => l.startsWith('ERROR:'));
+      const detail = errLines[errLines.length - 1] || lines[lines.length - 1] || 'No se pudo extraer audio con yt-dlp.';
+      const low = detail.toLowerCase();
+      if (low.includes('sign in') || low.includes('bot') || low.includes('cookies')) {
+        return `${detail} — YouTube solicitó verificación anti-bot en esta red. Puedes cargar un archivo cookies.txt opcional o usar una fuente libre como Pixabay/Freesound.`;
+      }
+      if (low.includes('not available') || low.includes('unavailable')) {
+        return hasCookies
+          ? `${detail} — El vídeo no está disponible (privado, eliminado o restringido).`
+          : `${detail} — Comprueba que el vídeo sea público y sin restricción de edad/región. Si sigue fallando, actualiza yt-dlp o carga un cookies.txt opcional.`;
+      }
+      return detail;
+    };
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campana-yt-'));
+    try {
+      let stdout = '';
+      let lastErrText = '';
+      let succeeded = false;
+
+      const clearTmpFiles = () => {
+        for (const f of fs.readdirSync(tmpDir)) {
+          fs.rmSync(path.join(tmpDir, f), { force: true });
+        }
+      };
+
+      for (const extraArgs of strategies) {
+        clearTmpFiles();
+        try {
+          const resExec = await runYtDlp(ytDlpBin, extraArgs, tmpDir);
+          stdout = resExec.stdout;
+          if (fs.readdirSync(tmpDir).some((f) => f.toLowerCase().endsWith('.mp3'))) {
+            succeeded = true;
+            break;
+          }
+        } catch (err: unknown) {
+          const stderr =
+            err && typeof err === 'object' && 'stderr' in err
+              ? String((err as { stderr?: string }).stderr ?? '')
+              : '';
+          lastErrText = stderr || (err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      if (!succeeded && isYouTube) {
+        const refreshed = await downloadLatestYtDlp();
+        if (refreshed) {
+          for (const extraArgs of [['--extractor-args', 'youtube:player_client=android_vr,tv'], []]) {
+            clearTmpFiles();
+            try {
+              const resExec = await runYtDlp(refreshed, extraArgs, tmpDir);
+              stdout = resExec.stdout;
+              if (fs.readdirSync(tmpDir).some((f) => f.toLowerCase().endsWith('.mp3'))) {
+                succeeded = true;
+                break;
+              }
+            } catch (err: unknown) {
+              const stderr =
+                err && typeof err === 'object' && 'stderr' in err
+                  ? String((err as { stderr?: string }).stderr ?? '')
+                  : '';
+              lastErrText = stderr || (err instanceof Error ? err.message : String(err));
+            }
+          }
+        }
+      }
+
+      const files = fs.readdirSync(tmpDir).filter((f) => f.toLowerCase().endsWith('.mp3'));
+      if (!succeeded || files.length === 0) {
+        res.status(lastErrText ? 500 : 400).json({
+          error: lastErrText
+            ? `Error al importar audio: ${formatYtDlpError(lastErrText)}`
+            : 'yt-dlp no generó ningún archivo MP3 (comprueba que el vídeo sea público y dure menos de 30 minutos).',
+        });
+        return;
+      }
 
       let meta: { title?: string; duration?: number } = {};
       for (const line of stdout.split('\n')) {
@@ -867,17 +1022,12 @@ async function startServer() {
         }
       }
 
-      const files = fs.readdirSync(tmpDir).filter((f) => f.toLowerCase().endsWith('.mp3'));
-      if (files.length === 0) {
-        res.status(400).json({
-          error:
-            'yt-dlp no generó ningún archivo MP3 (comprueba que el vídeo dure menos de 15 minutos y no sea privado).',
-        });
-        return;
-      }
-
       const srcMp3 = path.join(tmpDir, files[0]);
       const mp3Buf = fs.readFileSync(srcMp3);
+      if (mp3Buf.length > 25 * 1024 * 1024) {
+        res.status(400).json({ error: 'El archivo MP3 resultante supera el límite permitido de 25 MB.' });
+        return;
+      }
       const rawTitle = customName || meta.title || path.basename(files[0], '.mp3');
       const safeFileName = `${slugify(rawTitle)}-${crypto.randomUUID().slice(0, 6)}.mp3`;
       fs.writeFileSync(path.join(AUDIO_DIR, safeFileName), mp3Buf);
@@ -900,16 +1050,30 @@ async function startServer() {
       state.tones.push(created);
       saveState(state);
       res.status(201).json({ tone: created, state: buildClientState(true) });
-    } catch (err: unknown) {
-      const stderr =
-        err && typeof err === 'object' && 'stderr' in err
-          ? String((err as { stderr?: string }).stderr ?? '')
-          : '';
-      const lastLine = stderr.trim().split('\n').pop() || (err instanceof Error ? err.message : String(err));
-      res.status(500).json({ error: `Error al extraer audio con yt-dlp: ${lastLine}` });
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  app.post('/api/tones/youtube-cookies', requireAdminAuth, (req, res) => {
+    const { cookiesText } = req.body as { cookiesText?: string };
+    const clean = (cookiesText ?? '').trim();
+    if (!clean || !clean.toLowerCase().includes('youtube')) {
+      res.status(400).json({
+        error: 'El contenido no parece un archivo cookies.txt válido de YouTube en formato Netscape.',
+      });
+      return;
+    }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(YOUTUBE_COOKIES_FILE, `${clean}\n`, 'utf-8');
+    res.json({ state: buildClientState(true) });
+  });
+
+  app.delete('/api/tones/youtube-cookies', requireAdminAuth, (_req, res) => {
+    if (fs.existsSync(YOUTUBE_COOKIES_FILE)) {
+      fs.unlinkSync(YOUTUBE_COOKIES_FILE);
+    }
+    res.json({ state: buildClientState(true) });
   });
 
   app.delete('/api/tones/:id', requireAdminAuth, (req, res) => {

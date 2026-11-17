@@ -469,20 +469,24 @@ if __name__ == "__main__":
 export function generateSyncTimersPy(): string {
   return `#!/usr/bin/env python3
 """
-CampanaOS - Sincronizador de unidades systemd .timer (Python 3.8+)
+CampanaOS - Sincronizador de unidades systemd .timer y red mDNS (Python 3.8+)
 Lee /opt/campana-os/schedule.json, genera los archivos campana-ring-*.timer,
-elimina los obsoletos y recarga systemd. Debe ejecutarse como root (vía sudoers).
+configura hostname/Avahi mDNS (<nombre>.local) y recarga systemd.
+Debe ejecutarse como root (vía sudoers o install.sh).
 """
 
 import json
 import re
+import socket
 import subprocess
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 BASE_DIR = Path("/opt/campana-os")
 CONFIG_PATH = BASE_DIR / "schedule.json"
 SYSTEMD_DIR = Path("/etc/systemd/system")
+AVAHI_SERVICE_PATH = Path("/etc/avahi/services/campana-os.service")
+HOSTS_PATH = Path("/etc/hosts")
 TIMER_PREFIX = "campana-ring-"
 
 DAY_MAP: Dict[int, str] = {
@@ -500,6 +504,11 @@ def sanitize_id(raw_id: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "-", raw_id)
 
 
+def sanitize_mdns_host(raw_host: Any) -> str:
+    cleaned = re.sub(r"[^a-z0-9-]+", "-", str(raw_host or "").strip().lower()).strip("-")
+    return cleaned[:63] or "campana-escolar"
+
+
 def format_oncalendar_days(days: List[int]) -> str:
     ordered = sorted(set(days))
     if ordered == [1, 2, 3, 4, 5, 6, 7]:
@@ -513,8 +522,77 @@ def run_systemctl(*args: str) -> None:
     subprocess.run(["systemctl", *args], check=False)
 
 
+def sync_mdns_hostname(config: Dict[str, Any]) -> None:
+    sec_cfg = config.get("security") or config.get("network") or {}
+    mdns_host = sanitize_mdns_host(sec_cfg.get("hostnameMdns", "campana-escolar"))
+    try:
+        web_port = int(sec_cfg.get("webPort", 3000))
+    except (TypeError, ValueError):
+        web_port = 3000
+
+    school_name = str(config.get("hardware", {}).get("schoolName", "CampanaOS")).replace("&", "&amp;").replace("<", "&lt;")
+    service_xml = (
+        '<?xml version="1.0" standalone="no"?>\\n'
+        '<!DOCTYPE service-group SYSTEM "avahi-service.dtd">\\n'
+        "<service-group>\\n"
+        "  <name replace-wildcards=\\"yes\\">CampanaOS - {school} (%h)</name>\\n"
+        "  <service>\\n"
+        "    <type>_http._tcp</type>\\n"
+        "    <port>{port}</port>\\n"
+        "  </service>\\n"
+        "</service-group>\\n"
+    ).format(school=school_name, port=web_port)
+
+    avahi_changed = False
+    try:
+        AVAHI_SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        prev_xml = AVAHI_SERVICE_PATH.read_text(encoding="utf-8") if AVAHI_SERVICE_PATH.exists() else ""
+        if prev_xml != service_xml:
+            AVAHI_SERVICE_PATH.write_text(service_xml, encoding="utf-8")
+            avahi_changed = True
+    except Exception:
+        pass
+
+    current_host = socket.gethostname().split(".")[0].strip().lower()
+    if current_host != mdns_host:
+        res = subprocess.run(["hostnamectl", "set-hostname", mdns_host], check=False)
+        if res.returncode != 0:
+            try:
+                Path("/etc/hostname").write_text(mdns_host + "\\n", encoding="utf-8")
+                subprocess.run(["hostname", mdns_host], check=False)
+            except Exception:
+                pass
+        avahi_changed = True
+
+    try:
+        hosts_lines = HOSTS_PATH.read_text(encoding="utf-8").splitlines() if HOSTS_PATH.exists() else []
+        new_lines: List[str] = []
+        replaced = False
+        for line in hosts_lines:
+            if re.match(r"^\\s*127\\.0\\.1\\.1\\s+", line):
+                new_lines.append("127.0.1.1\\t{0}".format(mdns_host))
+                replaced = True
+            else:
+                new_lines.append(line)
+        if not replaced:
+            new_lines.append("127.0.1.1\\t{0}".format(mdns_host))
+        new_hosts_text = "\\n".join(new_lines).rstrip() + "\\n"
+        prev_hosts_text = HOSTS_PATH.read_text(encoding="utf-8") if HOSTS_PATH.exists() else ""
+        if prev_hosts_text != new_hosts_text:
+            HOSTS_PATH.write_text(new_hosts_text, encoding="utf-8")
+            avahi_changed = True
+    except Exception:
+        pass
+
+    if avahi_changed:
+        run_systemctl("enable", "avahi-daemon")
+        run_systemctl("restart", "avahi-daemon")
+
+
 def main() -> None:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+    sync_mdns_hostname(config)
 
     active_profile_id = config.get("activeProfileId")
     profiles = {p["id"]: p for p in config.get("profiles", [])}
@@ -571,8 +649,8 @@ if __name__ == "__main__":
 
 export function generateInstallScript(state: BellAppState, options: TemplateRenderOptions = {}): string {
   const configuredUser = state.hardware.linuxUser || 'pi';
-  const mdns = state.security.hostnameMdns || 'campana-escolar';
-  const port = state.security.webPort || 3000;
+  const defaultMdns = state.security.hostnameMdns || 'campana-escolar';
+  const defaultPort = state.security.webPort || 3000;
   const preferSudoUser = options.mode === 'git';
 
   return `#!/usr/bin/env bash
@@ -655,10 +733,10 @@ PY_VER=$(python3 -c 'import sys; print("{0}.{1}".format(*sys.version_info[:2]))'
 echo "[1/6] Origen: $SOURCE_LABEL"
 echo "      Usuario: $TARGET_USER (UID $TARGET_UID) · Arch: $(uname -m) · Python $PY_VER"
 
-echo "[2/6] Instalando paquetes de audio PipeWire/ALSA, ffmpeg y red local (sin Node.js ni pip global)..."
+echo "[2/6] Instalando paquetes de audio PipeWire/ALSA, ffmpeg y red local mDNS..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y python3 mpv ffmpeg curl ca-certificates alsa-utils avahi-daemon dbus-user-session
+apt-get install -y python3 mpv ffmpeg curl ca-certificates alsa-utils avahi-daemon libnss-mdns avahi-utils dbus-user-session
 
 for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse wireplumber; do
   if apt-cache show "$opt_pkg" >/dev/null 2>&1; then
@@ -666,9 +744,12 @@ for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse wireplumber; do
   fi
 done
 
-echo "[2b/6] Instalando herramienta libre yt-dlp (compatible Python 3.8-3.13 y RPi OS Trixie 32-bit armhf)..."
+echo "[2b/6] Instalando o actualizando yt-dlp oficial (compatible Python 3.8-3.13 y RPi OS Trixie 32-bit armhf)..."
 if curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o /usr/local/bin/yt-dlp; then
   chmod a+rx /usr/local/bin/yt-dlp
+  /usr/local/bin/yt-dlp --version || true
+elif [[ -x /usr/local/bin/yt-dlp ]]; then
+  /usr/local/bin/yt-dlp -U || true
 elif apt-cache show yt-dlp >/dev/null 2>&1; then
   apt-get install -y yt-dlp || true
 else
@@ -698,12 +779,12 @@ data = json.loads(cfg_path.read_text(encoding="utf-8"))
 data.setdefault("hardware", {})["linuxUser"] = target_user
 cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 PYEOF
-  if [[ -d "$SRC_DIR/audio" ]]; then
+  if [[ -d "$SRC_DIR/audio" ]] && compgen -G "$SRC_DIR/audio/*" >/dev/null; then
     cp -rf "$SRC_DIR/audio/"* "$INSTALL_DIR/audio/" 2>/dev/null || true
   fi
 fi
 
-if [[ -d "$SRC_DIR/webapp" ]]; then
+if [[ -d "$SRC_DIR/webapp" ]] && compgen -G "$SRC_DIR/webapp/*" >/dev/null; then
   rm -rf "$INSTALL_DIR/webapp"/*
   cp -rf "$SRC_DIR/webapp/"* "$INSTALL_DIR/webapp/"
 fi
@@ -719,7 +800,14 @@ if command -v visudo >/dev/null 2>&1; then
   visudo -cf /etc/sudoers.d/campana-os
 fi
 
-echo "[6/6] Activando Avahi mDNS, timers systemd y panel web..."
+ACTIVE_MDNS=$(python3 -c 'import json, re; d=json.load(open("/opt/campana-os/schedule.json")); h=(d.get("security") or d.get("network") or {}).get("hostnameMdns","${defaultMdns}"); print(re.sub(r"[^a-z0-9-]+","-",str(h).lower()).strip("-") or "${defaultMdns}")' 2>/dev/null || echo "${defaultMdns}")
+ACTIVE_PORT=$(python3 -c 'import json; d=json.load(open("/opt/campana-os/schedule.json")); print(int((d.get("security") or d.get("network") or {}).get("webPort", ${defaultPort})))' 2>/dev/null || echo "${defaultPort}")
+
+echo "[6/6] Activando mDNS ($ACTIVE_MDNS.local), timers systemd y panel web..."
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 5353/udp >/dev/null 2>&1 || true
+  ufw allow "$ACTIVE_PORT/tcp" >/dev/null 2>&1 || true
+fi
 systemctl enable --now avahi-daemon || true
 python3 "$INSTALL_DIR/sync_timers.py"
 systemctl daemon-reload
@@ -730,13 +818,23 @@ else
   systemctl enable --now campana-web.service
 fi
 
+LAN_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$' | head -n 3 | tr '\n' ' ' || true)
+
 echo ""
 echo "Tarjetas de audio detectadas en el sistema:"
 aplay -l 2>/dev/null | grep -E '^card ' || true
 echo ""
+echo "Comprobación mDNS ($ACTIVE_MDNS.local):"
+avahi-resolve -4 -n "$ACTIVE_MDNS.local" 2>/dev/null || echo "  Aviso: si tu router/Wi-Fi escolar bloquea multicast mDNS (UDP 5353), usa la IP directa."
+echo ""
 echo "Instalación/actualización completada con éxito."
-echo "Panel local:          http://localhost:${port}"
-echo "Panel en red local:   http://${mdns}.local:${port} (o http://$(hostname -I | awk '{print $1}'):${port})"
+echo "Panel local:          http://localhost:$ACTIVE_PORT"
+echo "Panel mDNS (LAN):     http://$ACTIVE_MDNS.local:$ACTIVE_PORT"
+if [[ -n "$LAN_IPS" ]]; then
+  for ip in $LAN_IPS; do
+    echo "Panel por IP (LAN):   http://$ip:$ACTIVE_PORT"
+  done
+fi
 echo "Ver próximos toques:  systemctl list-timers 'campana-ring-*'"
 echo "Ver logs de audio:    sudo journalctl -u 'campana-ring@*' -f"
 echo "Probar audio ahora:   sudo -u $TARGET_USER python3 $INSTALL_DIR/timbre_runner.py --test-audio"

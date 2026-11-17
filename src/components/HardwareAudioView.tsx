@@ -106,6 +106,8 @@ interface HardwareAudioViewProps {
     url: string,
     name?: string
   ) => Promise<{ ok: boolean; error?: string; toneName?: string }>;
+  onUploadYoutubeCookies: (cookiesText: string) => Promise<{ ok: boolean; error?: string }>;
+  onClearYoutubeCookies: () => Promise<void>;
   onDeleteTone: (id: string) => Promise<void>;
   onExportBackup: (backupName: string) => void;
   onImportBackup: (
@@ -123,6 +125,8 @@ export function HardwareAudioView({
   onStopAudio,
   onUploadTone,
   onImportToneFromUrl,
+  onUploadYoutubeCookies,
+  onClearYoutubeCookies,
   onDeleteTone,
   onExportBackup,
   onImportBackup,
@@ -137,6 +141,7 @@ export function HardwareAudioView({
   const [importingUrl, setImportingUrl] = useState(false);
   const [importUrlError, setImportUrlError] = useState<string | null>(null);
   const [importUrlSuccess, setImportUrlSuccess] = useState<string | null>(null);
+  const cookiesInputRef = useRef<HTMLInputElement | null>(null);
 
   const [hostnameMdns, setHostnameMdns] = useState(state.security.hostnameMdns);
   const [webPort, setWebPort] = useState(state.security.webPort);
@@ -244,6 +249,24 @@ export function HardwareAudioView({
       setImportUrlSuccess(`Audio "${result.toneName ?? 'importado'}" añadido correctamente a la biblioteca.`);
     } finally {
       setImportingUrl(false);
+    }
+  };
+
+  const handleCookiesFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportUrlError(null);
+    setImportUrlSuccess(null);
+    try {
+      const text = await file.text();
+      const res = await onUploadYoutubeCookies(text);
+      if (!res.ok) {
+        setImportUrlError(res.error ?? 'No se pudo cargar cookies.txt.');
+        return;
+      }
+      setImportUrlSuccess('Archivo cookies.txt guardado para descargas de YouTube.');
+    } finally {
+      if (cookiesInputRef.current) cookiesInputRef.current.value = '';
     }
   };
 
@@ -355,6 +378,7 @@ export function HardwareAudioView({
               type="text"
               required
               value={form.schoolName}
+              placeholder="C.E.I.P. Urbano Palma"
               onChange={(e) => setForm({ ...form, schoolName: e.target.value })}
               className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-900"
             />
@@ -453,10 +477,21 @@ export function HardwareAudioView({
               </p>
             </div>
           </div>
-          <span className="font-mono text-xs text-slate-600 whitespace-nowrap">
-            http://{hostnameMdns || 'campana-escolar'}.local:{webPort}
-          </span>
+          <div className="text-right font-mono text-xs text-slate-600 space-y-0.5">
+            <div className="whitespace-nowrap">
+              http://{hostnameMdns || 'campana-escolar'}.local:{webPort}
+            </div>
+            {state.lanIps && state.lanIps.length > 0 && (
+              <div className="text-slate-500 whitespace-nowrap">
+                IP LAN: http://{state.lanIps[0]}:{webPort}
+              </div>
+            )}
+          </div>
         </div>
+
+        <p className="text-xs text-slate-500">
+          Al guardar un nuevo nombre mDNS en Raspberry Pi, se actualiza el hostname del sistema y <span className="font-mono">avahi-daemon</span>. Si la red Wi-Fi del centro bloquea multicast <span className="font-mono">.local</span> (UDP 5353), utiliza la IP local del equipo.
+        </p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
@@ -639,7 +674,7 @@ export function HardwareAudioView({
               </span>
             </div>
             <span className="text-xs text-slate-500 tabular-nums">
-              Máx. 15 min · 20 MB · Conversión automática a MP3
+              Máx. 30 min · 25 MB · Conversión automática a MP3
             </span>
           </div>
 
@@ -683,9 +718,40 @@ export function HardwareAudioView({
             </div>
           </div>
 
-          <p className="text-xs text-slate-500">
-            Usa preferiblemente audios con licencia libre, dominio público o grabaciones educativas del centro.
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-slate-500">
+              Usa preferiblemente audios con licencia libre, dominio público o grabaciones educativas del centro.
+            </p>
+            <div className="flex items-center gap-3 text-xs">
+              <input
+                ref={cookiesInputRef}
+                type="file"
+                accept=".txt"
+                onChange={(e) => void handleCookiesFileChange(e)}
+                className="hidden"
+              />
+              {state.hasYoutubeCookies ? (
+                <>
+                  <span className="text-emerald-700 font-medium">cookies.txt activo</span>
+                  <button
+                    type="button"
+                    onClick={() => void onClearYoutubeCookies()}
+                    className="text-slate-600 underline hover:text-slate-900 cursor-pointer"
+                  >
+                    Quitar cookies
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => cookiesInputRef.current?.click()}
+                  className="text-slate-600 underline hover:text-slate-900 cursor-pointer"
+                >
+                  Cargar cookies.txt (opcional para YouTube)
+                </button>
+              )}
+            </div>
+          </div>
 
           {importUrlError && (
             <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs font-medium text-red-700">

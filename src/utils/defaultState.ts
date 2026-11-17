@@ -115,7 +115,7 @@ export function createDefaultBellState(options: DefaultStateOptions = {}): BellA
   ];
 
   const hardware: HardwareConfig = {
-    schoolName: 'I.E.S. Sierra Norte',
+    schoolName: 'C.E.I.P. Urbano Palma',
     linuxUser: 'pi',
     audioBackend: 'mpv',
     audioOutput: 'default',

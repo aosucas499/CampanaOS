@@ -1,8 +1,8 @@
 {
-  "schoolName": "I.E.S. Sierra Norte",
+  "schoolName": "C.E.I.P. Urbano Palma",
   "activeProfileId": "prof-normal",
   "hardware": {
-    "schoolName": "I.E.S. Sierra Norte",
+    "schoolName": "C.E.I.P. Urbano Palma",
     "linuxUser": "pi",
     "audioBackend": "mpv",
     "audioOutput": "default",

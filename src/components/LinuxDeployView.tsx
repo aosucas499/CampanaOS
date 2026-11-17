@@ -176,8 +176,13 @@ systemctl list-timers 'campana-ring-*'`;
           <div className="font-mono text-sm font-semibold text-slate-700 truncate">
             http://{mdns}.local:{port}
           </div>
+          {state.lanIps && state.lanIps.length > 0 && (
+            <div className="font-mono text-xs text-slate-600 truncate">
+              http://{state.lanIps[0]}:{port}
+            </div>
+          )}
           <div className="text-xs text-slate-500">
-            Servido por <span className="font-mono">web_panel.py</span> (Python 3 estándar)
+            Servido por <span className="font-mono">web_panel.py</span> (Avahi mDNS + IP LAN)
           </div>
         </div>
 

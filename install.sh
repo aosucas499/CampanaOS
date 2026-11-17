@@ -34,7 +34,7 @@ done
 
 echo "=================================================================="
 echo " Instalador CampanaOS - Raspberry Pi OS Trixie/Bookworm y Ubuntu"
-echo " Centro: I.E.S. Sierra Norte"
+echo " Centro: C.E.I.P. Urbano Palma"
 echo "=================================================================="
 
 if [[ $EUID -ne 0 ]]; then
@@ -78,10 +78,10 @@ PY_VER=$(python3 -c 'import sys; print("{0}.{1}".format(*sys.version_info[:2]))'
 echo "[1/6] Origen: $SOURCE_LABEL"
 echo "      Usuario: $TARGET_USER (UID $TARGET_UID) · Arch: $(uname -m) · Python $PY_VER"
 
-echo "[2/6] Instalando paquetes de audio PipeWire/ALSA, ffmpeg y red local (sin Node.js ni pip global)..."
+echo "[2/6] Instalando paquetes de audio PipeWire/ALSA, ffmpeg y red local mDNS..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y python3 mpv ffmpeg curl ca-certificates alsa-utils avahi-daemon dbus-user-session
+apt-get install -y python3 mpv ffmpeg curl ca-certificates alsa-utils avahi-daemon libnss-mdns avahi-utils dbus-user-session
 
 for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse wireplumber; do
   if apt-cache show "$opt_pkg" >/dev/null 2>&1; then
@@ -89,9 +89,12 @@ for opt_pkg in pulseaudio-utils pipewire-alsa pipewire-pulse wireplumber; do
   fi
 done
 
-echo "[2b/6] Instalando herramienta libre yt-dlp (compatible Python 3.8-3.13 y RPi OS Trixie 32-bit armhf)..."
+echo "[2b/6] Instalando o actualizando yt-dlp oficial (compatible Python 3.8-3.13 y RPi OS Trixie 32-bit armhf)..."
 if curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" -o /usr/local/bin/yt-dlp; then
   chmod a+rx /usr/local/bin/yt-dlp
+  /usr/local/bin/yt-dlp --version || true
+elif [[ -x /usr/local/bin/yt-dlp ]]; then
+  /usr/local/bin/yt-dlp -U || true
 elif apt-cache show yt-dlp >/dev/null 2>&1; then
   apt-get install -y yt-dlp || true
 else
@@ -121,12 +124,12 @@ data = json.loads(cfg_path.read_text(encoding="utf-8"))
 data.setdefault("hardware", {})["linuxUser"] = target_user
 cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 PYEOF
-  if [[ -d "$SRC_DIR/audio" ]]; then
+  if [[ -d "$SRC_DIR/audio" ]] && compgen -G "$SRC_DIR/audio/*" >/dev/null; then
     cp -rf "$SRC_DIR/audio/"* "$INSTALL_DIR/audio/" 2>/dev/null || true
   fi
 fi
 
-if [[ -d "$SRC_DIR/webapp" ]]; then
+if [[ -d "$SRC_DIR/webapp" ]] && compgen -G "$SRC_DIR/webapp/*" >/dev/null; then
   rm -rf "$INSTALL_DIR/webapp"/*
   cp -rf "$SRC_DIR/webapp/"* "$INSTALL_DIR/webapp/"
 fi
@@ -142,7 +145,14 @@ if command -v visudo >/dev/null 2>&1; then
   visudo -cf /etc/sudoers.d/campana-os
 fi
 
-echo "[6/6] Activando Avahi mDNS, timers systemd y panel web..."
+ACTIVE_MDNS=$(python3 -c 'import json, re; d=json.load(open("/opt/campana-os/schedule.json")); h=(d.get("security") or d.get("network") or {}).get("hostnameMdns","campana-escolar"); print(re.sub(r"[^a-z0-9-]+","-",str(h).lower()).strip("-") or "campana-escolar")' 2>/dev/null || echo "campana-escolar")
+ACTIVE_PORT=$(python3 -c 'import json; d=json.load(open("/opt/campana-os/schedule.json")); print(int((d.get("security") or d.get("network") or {}).get("webPort", 3000)))' 2>/dev/null || echo "3000")
+
+echo "[6/6] Activando mDNS ($ACTIVE_MDNS.local), timers systemd y panel web..."
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 5353/udp >/dev/null 2>&1 || true
+  ufw allow "$ACTIVE_PORT/tcp" >/dev/null 2>&1 || true
+fi
 systemctl enable --now avahi-daemon || true
 python3 "$INSTALL_DIR/sync_timers.py"
 systemctl daemon-reload
@@ -153,13 +163,25 @@ else
   systemctl enable --now campana-web.service
 fi
 
+LAN_IPS=$(hostname -I 2>/dev/null | tr ' ' '
+' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 3 | tr '
+' ' ' || true)
+
 echo ""
 echo "Tarjetas de audio detectadas en el sistema:"
 aplay -l 2>/dev/null | grep -E '^card ' || true
 echo ""
+echo "Comprobación mDNS ($ACTIVE_MDNS.local):"
+avahi-resolve -4 -n "$ACTIVE_MDNS.local" 2>/dev/null || echo "  Aviso: si tu router/Wi-Fi escolar bloquea multicast mDNS (UDP 5353), usa la IP directa."
+echo ""
 echo "Instalación/actualización completada con éxito."
-echo "Panel local:          http://localhost:3000"
-echo "Panel en red local:   http://campana-escolar.local:3000 (o http://$(hostname -I | awk '{print $1}'):3000)"
+echo "Panel local:          http://localhost:$ACTIVE_PORT"
+echo "Panel mDNS (LAN):     http://$ACTIVE_MDNS.local:$ACTIVE_PORT"
+if [[ -n "$LAN_IPS" ]]; then
+  for ip in $LAN_IPS; do
+    echo "Panel por IP (LAN):   http://$ip:$ACTIVE_PORT"
+  done
+fi
 echo "Ver próximos toques:  systemctl list-timers 'campana-ring-*'"
 echo "Ver logs de audio:    sudo journalctl -u 'campana-ring@*' -f"
 echo "Probar audio ahora:   sudo -u $TARGET_USER python3 $INSTALL_DIR/timbre_runner.py --test-audio"

@@ -83,6 +83,8 @@ export interface BellAppState {
   systemdSync: SystemdSyncStatus;
   authenticated: boolean;
   locked?: boolean;
+  lanIps?: string[];
+  hasYoutubeCookies?: boolean;
   logs: BellLogEntry[];
   serverTimeIso: string;
 }

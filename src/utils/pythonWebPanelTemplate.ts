@@ -36,6 +36,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 BASE_DIR = Path(__file__).resolve().parent
 WEBAPP_DIR = BASE_DIR / "webapp"
 AUDIO_DIR = BASE_DIR / "audio"
+BIN_DIR = BASE_DIR / "bin"
+COOKIES_PATH = BASE_DIR / "youtube-cookies.txt"
 SCHEDULE_PATH = BASE_DIR / "schedule.json"
 SECRETS_PATH = BASE_DIR / "auth-secrets.json"
 SYNC_SCRIPT = BASE_DIR / "sync_timers.py"
@@ -45,11 +47,64 @@ COOKIE_NAME = "campana_session"
 STATE_LOCK = threading.Lock()
 
 DIRECT_AUDIO_RE = re.compile(r"\\.(mp3|wav|ogg|m4a|aac|flac)$", re.IGNORECASE)
+YOUTUBE_HOST_RE = re.compile(r"(^|\\.)(youtube\\.com|youtu\\.be|youtube-nocookie\\.com)$", re.IGNORECASE)
 
 
 def slugify_audio_name(value: str) -> str:
     clean = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-")
     return clean[:64] or "audio-{0}".format(uuid.uuid4().hex[:6])
+
+
+def resolve_yt_dlp_bin() -> Optional[str]:
+    local_bin = BIN_DIR / "yt-dlp"
+    for candidate in (local_bin, Path("/usr/local/bin/yt-dlp")):
+        if candidate.is_file() and os.access(str(candidate), os.X_OK):
+            return str(candidate)
+    return shutil.which("yt-dlp")
+
+
+def download_latest_yt_dlp() -> Optional[str]:
+    try:
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        target = BIN_DIR / "yt-dlp"
+        req = urllib.request.Request(
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+            headers={"User-Agent": "CampanaOS/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            blob = resp.read()
+        if len(blob) > 100000:
+            target.write_bytes(blob)
+            target.chmod(0o755)
+            return str(target)
+    except Exception:
+        pass
+    return None
+
+
+def detect_js_runtime_args() -> List[str]:
+    deno_bin = shutil.which("deno")
+    if deno_bin:
+        return ["--js-runtimes", "deno:{0}".format(deno_bin)]
+    node_bin = shutil.which("node") or shutil.which("nodejs")
+    if node_bin:
+        return ["--js-runtimes", "node:{0}".format(node_bin)]
+    return []
+
+
+def format_yt_dlp_error(raw_stderr: str, has_cookies: bool) -> str:
+    lines = [ln.strip() for ln in (raw_stderr or "").splitlines() if ln.strip()]
+    error_lines = [ln for ln in lines if ln.startswith("ERROR:")]
+    detail = error_lines[-1] if error_lines else (lines[-1] if lines else "No se pudo extraer el audio con yt-dlp.")
+    low = detail.lower()
+    if "sign in" in low or "bot" in low or "cookies" in low:
+        hint = "YouTube ha pedido verificación anti-bot en esta red. Puedes cargar un archivo cookies.txt en la sección de importación o usar una fuente libre como Pixabay/Freesound."
+        return "{0} — {1}".format(detail, hint)
+    if "not available" in low or "unavailable" in low:
+        if not has_cookies:
+            return "{0} — Comprueba que el vídeo sea público y sin restricción de edad/región. Si sigue fallando, actualiza yt-dlp o carga cookies.txt opcional.".format(detail)
+        return "{0} — El vídeo no está disponible (privado, eliminado o bloqueado en esta región).".format(detail)
+    return detail
 
 
 def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
@@ -62,9 +117,9 @@ def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
     if DIRECT_AUDIO_RE.search(path_lower):
         req = urllib.request.Request(raw_url.strip(), headers={"User-Agent": "CampanaOS/1.0"})
         with urllib.request.urlopen(req, timeout=45) as resp:
-            content = resp.read(20 * 1024 * 1024 + 1)
-            if len(content) > 20 * 1024 * 1024:
-                raise ValueError("El archivo de audio supera el límite de 20 MB.")
+            content = resp.read(25 * 1024 * 1024 + 1)
+            if len(content) > 25 * 1024 * 1024:
+                raise ValueError("El archivo de audio supera el límite de 25 MB.")
             orig_base = os.path.basename(unquote(parsed.path or "")) or "audio.mp3"
             ext = os.path.splitext(orig_base)[1].lower() or ".mp3"
             stem = custom_name.strip() or os.path.splitext(orig_base)[0].replace("_", " ").replace("-", " ")
@@ -82,7 +137,7 @@ def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
                 "mimeType": ctype.split(";")[0].strip(),
             }
 
-    yt_dlp_bin = shutil.which("yt-dlp") or ("/usr/local/bin/yt-dlp" if Path("/usr/local/bin/yt-dlp").exists() else None)
+    yt_dlp_bin = resolve_yt_dlp_bin() or download_latest_yt_dlp()
     if not yt_dlp_bin:
         raise RuntimeError(
             "yt-dlp no está instalado. Ejecuta en terminal: sudo curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp"
@@ -90,35 +145,86 @@ def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg no está instalado. Ejecuta: sudo apt-get install -y ffmpeg")
 
-    with tempfile.TemporaryDirectory(prefix="campana_yt_") as tmp_dir:
+    is_youtube = bool(YOUTUBE_HOST_RE.search(parsed.hostname or ""))
+    js_args = detect_js_runtime_args()
+    has_cookies = COOKIES_PATH.is_file() and COOKIES_PATH.stat().st_size > 0
+    cookie_args = ["--cookies", str(COOKIES_PATH)] if has_cookies else []
+
+    strategies: List[List[str]] = (
+        [
+            ["--extractor-args", "youtube:player_client=android_vr,tv"],
+            ["--extractor-args", "youtube:player_client=tv,web_safari"],
+            ["--extractor-args", "youtube:player_client=mweb,ios"],
+            [],
+        ]
+        if is_youtube
+        else [[]]
+    )
+
+    def run_yt_dlp(bin_path: str, extra_args: List[str], tmp_dir: str) -> subprocess.CompletedProcess:
         out_tpl = str(Path(tmp_dir) / "%(id)s.%(ext)s")
         cmd = [
-            yt_dlp_bin,
+            bin_path,
+            "--force-ipv4",
+            "--ignore-config",
             "--no-playlist",
             "--no-warnings",
+            "--no-check-certificates",
+            "-f",
+            "bestaudio/best",
             "--match-filter",
-            "duration <= 900",
-            "--max-filesize",
-            "25M",
+            "duration <= 1800",
             "--extract-audio",
             "--audio-format",
             "mp3",
             "--audio-quality",
             "192K",
             "--print-json",
+            *js_args,
+            *cookie_args,
+            *extra_args,
             "-o",
             out_tpl,
             "--",
             raw_url.strip(),
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if proc.returncode != 0:
-            err_msg = (proc.stderr or proc.stdout or "").strip().splitlines()
-            detail = err_msg[-1] if err_msg else "No se pudo extraer audio con yt-dlp"
-            raise RuntimeError(detail)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    with tempfile.TemporaryDirectory(prefix="campana_yt_") as tmp_dir:
+        last_proc: Optional[subprocess.CompletedProcess] = None
+        succeeded_proc: Optional[subprocess.CompletedProcess] = None
+
+        for extra in strategies:
+            for stale in Path(tmp_dir).glob("*"):
+                if stale.is_file():
+                    stale.unlink()
+            proc = run_yt_dlp(yt_dlp_bin, extra, tmp_dir)
+            last_proc = proc
+            if proc.returncode == 0 and list(Path(tmp_dir).glob("*.mp3")):
+                succeeded_proc = proc
+                break
+
+        if not succeeded_proc and is_youtube:
+            refreshed = download_latest_yt_dlp()
+            if refreshed:
+                for extra in (["--extractor-args", "youtube:player_client=android_vr,tv"], []):
+                    for stale in Path(tmp_dir).glob("*"):
+                        if stale.is_file():
+                            stale.unlink()
+                    proc = run_yt_dlp(refreshed, extra, tmp_dir)
+                    last_proc = proc
+                    if proc.returncode == 0 and list(Path(tmp_dir).glob("*.mp3")):
+                        succeeded_proc = proc
+                        break
+
+        if not succeeded_proc:
+            raw_err = (last_proc.stderr or last_proc.stdout or "") if last_proc else ""
+            if not raw_err and last_proc and last_proc.returncode == 0:
+                raise RuntimeError("yt-dlp no generó archivo MP3 (¿vídeo de más de 30 minutos o retransmisión en directo?).")
+            raise RuntimeError(format_yt_dlp_error(raw_err, has_cookies))
 
         meta: Dict[str, Any] = {}
-        for line in (proc.stdout or "").splitlines():
+        for line in (succeeded_proc.stdout or "").splitlines():
             line = line.strip()
             if line.startswith("{"):
                 try:
@@ -128,9 +234,12 @@ def import_audio_from_url(raw_url: str, custom_name: str) -> Dict[str, Any]:
 
         mp3_files = list(Path(tmp_dir).glob("*.mp3"))
         if not mp3_files:
-            raise RuntimeError("yt-dlp finalizó sin generar archivo MP3 (¿duración superior a 15 minutos?).")
+            raise RuntimeError("yt-dlp finalizó sin generar archivo MP3.")
 
         src_mp3 = mp3_files[0]
+        if src_mp3.stat().st_size > 25 * 1024 * 1024:
+            raise ValueError("El MP3 resultante supera el límite de 25 MB.")
+
         raw_title = str(custom_name.strip() or meta.get("title") or src_mp3.stem)
         safe_file = "{0}-{1}.mp3".format(slugify_audio_name(raw_title), uuid.uuid4().hex[:6])
         shutil.copy2(str(src_mp3), str(AUDIO_DIR / safe_file))
@@ -310,9 +419,24 @@ def sync_systemd_timers(data: Dict[str, Any]) -> Dict[str, Any]:
     return data["systemdSync"]
 
 
+def detect_lan_ips() -> List[str]:
+    ips: List[str] = []
+    try:
+        out = subprocess.check_output(["hostname", "-I"], text=True, timeout=2)
+        for tok in out.split():
+            if re.match(r"^\\d+\\.\\d+\\.\\d+\\.\\d+$", tok) and not tok.startswith("127."):
+                if tok not in ips:
+                    ips.append(tok)
+    except Exception:
+        pass
+    return ips[:4]
+
+
 def build_client_state(data: Dict[str, Any], sec: Dict[str, Any], authenticated: bool) -> Dict[str, Any]:
     sec_cfg = data.get("security", {})
     has_pin = bool(sec.get("adminPinHash"))
+    lan_ips = detect_lan_ips()
+    has_cookies = COOKIES_PATH.is_file() and COOKIES_PATH.stat().st_size > 0
     if sec_cfg.get("authEnabled") and sec_cfg.get("lockReadOnlyPreview") and not authenticated:
         return {
             "activeProfileId": data.get("activeProfileId"),
@@ -336,6 +460,8 @@ def build_client_state(data: Dict[str, Any], sec: Dict[str, Any], authenticated:
             },
             "authenticated": False,
             "locked": True,
+            "lanIps": lan_ips,
+            "hasYoutubeCookies": has_cookies,
             "logs": [],
             "serverTimeIso": now_iso(),
         }
@@ -344,6 +470,8 @@ def build_client_state(data: Dict[str, Any], sec: Dict[str, Any], authenticated:
     out["security"] = {**sec_cfg, "hasAdminPin": has_pin}
     out["authenticated"] = authenticated
     out["locked"] = False
+    out["lanIps"] = lan_ips
+    out["hasYoutubeCookies"] = has_cookies
     out["serverTimeIso"] = now_iso()
     return out
 
@@ -539,6 +667,20 @@ class CampanaHandler(BaseHTTPRequestHandler):
                 data["tones"].append(created)
                 save_state(data)
                 self._send_json(201, {"tone": created, "state": build_client_state(data, sec, True)})
+            return
+
+        if path_str == "/api/tones/youtube-cookies":
+            with STATE_LOCK:
+                sec = load_secrets()
+                data = load_state()
+                if not self._require_auth(data, sec):
+                    return
+                cookies_text = str(body.get("cookiesText", "")).strip()
+                if not cookies_text or "youtube" not in cookies_text.lower():
+                    self._send_json(400, {"error": "El contenido no parece un archivo cookies.txt válido de YouTube en formato Netscape."})
+                    return
+                COOKIES_PATH.write_text(cookies_text + "\\n", encoding="utf-8")
+                self._send_json(200, {"state": build_client_state(data, sec, True)})
             return
 
         with STATE_LOCK:
@@ -820,6 +962,7 @@ class CampanaHandler(BaseHTTPRequestHandler):
                     "webPort": port_val,
                 }
                 save_state(data)
+                sync_systemd_timers(data)
 
                 cookie_hdr = None
                 if auth_enabled:
@@ -868,6 +1011,12 @@ class CampanaHandler(BaseHTTPRequestHandler):
                     if s.get("toneId") == tone_id:
                         s["toneId"] = "classic-bell"
                 save_state(data)
+                self._send_json(200, {"state": build_client_state(data, sec, True)})
+                return
+
+            if path_str == "/api/tones/youtube-cookies":
+                if COOKIES_PATH.exists():
+                    COOKIES_PATH.unlink()
                 self._send_json(200, {"state": build_client_state(data, sec, True)})
                 return
 
