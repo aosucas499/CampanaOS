@@ -15,6 +15,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -160,12 +161,23 @@ def detect_alsa_device(output_dev: str) -> Optional[str]:
     return output_dev if output_dev.startswith("hw:") or output_dev.startswith("plughw:") else None
 
 
-def build_player_command(backend: str, volume: int, output_dev: str, audio_path: Path) -> List[str]:
+def build_player_command(
+    backend: str,
+    volume: int,
+    output_dev: str,
+    audio_path: Path,
+    start_sec: float = 0.0,
+    play_duration: float = 0.0,
+) -> List[str]:
     pulse_sink = detect_pulse_sink(output_dev)
     alsa_dev = detect_alsa_device(output_dev)
 
     if backend == "mpv":
         cmd = ["mpv", "--no-video", "--really-quiet", "--volume={0}".format(volume)]
+        if start_sec > 0:
+            cmd.append("--start={0:.2f}".format(start_sec))
+        if play_duration > 0:
+            cmd.append("--length={0:.2f}".format(play_duration))
         if output_dev != "default":
             if pulse_sink:
                 cmd.append("--audio-device=pulse/{0}".format(pulse_sink))
@@ -188,7 +200,45 @@ def build_player_command(backend: str, volume: int, output_dev: str, audio_path:
     return cmd
 
 
-def play_audio(tone: Dict[str, Any], hardware: Dict[str, Any]) -> None:
+def trim_audio_segment(
+    audio_path: Path,
+    start_sec: float,
+    play_duration: float,
+    target_ext: str,
+) -> Optional[Path]:
+    """Recorta temporalmente el fragmento solicitado con ffmpeg para reproductores sin --start/--length."""
+    if not shutil.which("ffmpeg") or (start_sec <= 0 and play_duration <= 0):
+        return None
+    tmp_dir = Path(tempfile.mkdtemp(prefix="campana-trim-"))
+    out_path = tmp_dir / ("segment" + target_ext)
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    if start_sec > 0:
+        cmd.extend(["-ss", "{0:.2f}".format(start_sec)])
+    cmd.extend(["-i", str(audio_path)])
+    if play_duration > 0:
+        cmd.extend(["-t", "{0:.2f}".format(play_duration)])
+    cmd.append("-vn")
+    if target_ext == ".wav":
+        cmd.extend(["-acodec", "pcm_s16le"])
+    else:
+        cmd.extend(["-acodec", "libmp3lame", "-q:a", "2"])
+    cmd.append(str(out_path))
+    try:
+        res = subprocess.run(cmd, check=False, timeout=45)
+        if res.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            return out_path
+    except Exception as exc:
+        logger.warning("ffmpeg no pudo recortar el fragmento: %s", exc)
+    shutil.rmtree(str(tmp_dir), ignore_errors=True)
+    return None
+
+
+def play_audio(
+    tone: Dict[str, Any],
+    hardware: Dict[str, Any],
+    start_sec: float = 0.0,
+    play_duration: float = 0.0,
+) -> None:
     backend = str(hardware.get("audioBackend", "mpv"))
     volume = int(hardware.get("masterVolume", 85))
     output_dev = str(hardware.get("audioOutput", "default"))
@@ -196,53 +246,82 @@ def play_audio(tone: Dict[str, Any], hardware: Dict[str, Any]) -> None:
     filename = str(tone.get("fileName") or "{0}.wav".format(tone_id))
     audio_path = AUDIO_DIR / filename
 
+    safe_start = max(0.0, float(start_sec or 0.0))
+    safe_dur = max(0.0, float(play_duration or 0.0))
+
     if not audio_path.exists():
         fallback_wav = AUDIO_DIR / "{0}.wav".format(tone_id)
         synthesize_tone_wav(tone_id, tone.get("synthPreset"), fallback_wav)
         audio_path = fallback_wav
 
-    cmd = build_player_command(backend, volume, output_dev, audio_path)
-    logger.info("Reproduciendo audio: %s", " ".join(cmd))
+    effective_path = audio_path
+    effective_start = safe_start
+    effective_dur = safe_dur
+    trimmed_path: Optional[Path] = None
+
+    if backend != "mpv" and (safe_start > 0 or safe_dur > 0):
+        target_ext = ".mp3" if backend == "mpg123" else ".wav"
+        trimmed_path = trim_audio_segment(audio_path, safe_start, safe_dur, target_ext)
+        if trimmed_path is not None:
+            effective_path = trimmed_path
+            effective_start = 0.0
+            effective_dur = 0.0
+
+    run_timeout = max(90, int(safe_dur) + 25) if safe_dur > 0 else 300
+    mpv_trim_args: List[str] = []
+    if safe_start > 0:
+        mpv_trim_args.append("--start={0:.2f}".format(safe_start))
+    if safe_dur > 0:
+        mpv_trim_args.append("--length={0:.2f}".format(safe_dur))
 
     try:
-        res = subprocess.run(cmd, check=False, timeout=60)
-        if res.returncode == 0:
-            return
-        logger.warning("El reproductor '%s' devolvió código %s; probando fallback PipeWire/ALSA.", backend, res.returncode)
-    except FileNotFoundError:
-        logger.warning("Reproductor '%s' no encontrado; probando fallback PipeWire/ALSA.", backend)
-    except Exception as exc:
-        logger.warning("Error ejecutando '%s': %s", backend, exc)
+        cmd = build_player_command(backend, volume, output_dev, effective_path, effective_start, effective_dur)
+        logger.info("Reproduciendo audio: %s", " ".join(cmd))
 
-    # Fallback 1: PipeWire / PulseAudio genérico (compartido en Trixie Desktop)
-    try:
-        res_pw = subprocess.run(
-            ["mpv", "--no-video", "--really-quiet", "--ao=pulse", "--volume={0}".format(volume), str(audio_path)],
-            check=False,
-            timeout=60,
-        )
-        if res_pw.returncode == 0:
-            return
-    except Exception:
-        pass
+        try:
+            res = subprocess.run(cmd, check=False, timeout=run_timeout)
+            if res.returncode == 0:
+                return
+            logger.warning("El reproductor '%s' devolvió código %s; probando fallback PipeWire/ALSA.", backend, res.returncode)
+        except FileNotFoundError:
+            logger.warning("Reproductor '%s' no encontrado; probando fallback PipeWire/ALSA.", backend)
+        except Exception as exc:
+            logger.warning("Error ejecutando '%s': %s", backend, exc)
 
-    # Fallback 2: ALSA directo apuntando a la tarjeta resuelta (o default)
-    alsa_dev = detect_alsa_device(output_dev)
-    try:
-        if audio_path.suffix.lower() == ".wav":
-            aplay_cmd = ["aplay", "-q"]
-            if alsa_dev:
-                aplay_cmd.extend(["-D", alsa_dev])
-            aplay_cmd.append(str(audio_path))
-            subprocess.run(aplay_cmd, check=False, timeout=60)
-        else:
-            mpv_alsa = ["mpv", "--no-video", "--really-quiet", "--ao=alsa", "--volume={0}".format(volume)]
-            if alsa_dev:
-                mpv_alsa.append("--audio-device=alsa/{0}".format(alsa_dev))
-            mpv_alsa.append(str(audio_path))
-            subprocess.run(mpv_alsa, check=False, timeout=60)
-    except Exception as exc:
-        logger.error("Fallback ALSA falló: %s", exc)
+        # Fallback 1: PipeWire / PulseAudio genérico (compartido en Trixie Desktop)
+        try:
+            res_pw = subprocess.run(
+                ["mpv", "--no-video", "--really-quiet", "--ao=pulse", "--volume={0}".format(volume)]
+                + mpv_trim_args
+                + [str(audio_path)],
+                check=False,
+                timeout=run_timeout,
+            )
+            if res_pw.returncode == 0:
+                return
+        except Exception:
+            pass
+
+        # Fallback 2: ALSA directo apuntando a la tarjeta resuelta (o default)
+        alsa_dev = detect_alsa_device(output_dev)
+        try:
+            if effective_path.suffix.lower() == ".wav" and (effective_start == 0 and effective_dur == 0):
+                aplay_cmd = ["aplay", "-q"]
+                if alsa_dev:
+                    aplay_cmd.extend(["-D", alsa_dev])
+                aplay_cmd.append(str(effective_path))
+                subprocess.run(aplay_cmd, check=False, timeout=run_timeout)
+            else:
+                mpv_alsa = ["mpv", "--no-video", "--really-quiet", "--ao=alsa", "--volume={0}".format(volume)] + mpv_trim_args
+                if alsa_dev:
+                    mpv_alsa.append("--audio-device=alsa/{0}".format(alsa_dev))
+                mpv_alsa.append(str(audio_path))
+                subprocess.run(mpv_alsa, check=False, timeout=run_timeout)
+        except Exception as exc:
+            logger.error("Fallback ALSA falló: %s", exc)
+    finally:
+        if trimmed_path is not None:
+            shutil.rmtree(str(trimmed_path.parent), ignore_errors=True)
 
 
 def is_holiday(today: datetime.date, holidays: List[Dict[str, Any]]) -> Optional[str]:
@@ -260,6 +339,8 @@ def main() -> None:
     parser.add_argument("--schedule-id", help="ID del toque en schedule.json")
     parser.add_argument("--tone-id", help="Reproduce inmediatamente un tono concreto por ID")
     parser.add_argument("--test-audio", action="store_true", help="Reproduce el primer tono configurado")
+    parser.add_argument("--start-sec", type=float, default=0.0, help="Segundo inicial de reproducción")
+    parser.add_argument("--duration-sec", type=float, default=0.0, help="Duración máxima en segundos")
     args = parser.parse_args()
 
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -268,12 +349,12 @@ def main() -> None:
     tones_map = {t["id"]: t for t in tones_list}
 
     if args.test_audio:
-        play_audio(tones_list[0], hardware)
+        play_audio(tones_list[0], hardware, args.start_sec, args.duration_sec)
         return
 
     if args.tone_id:
         tone = tones_map.get(args.tone_id, tones_list[0])
-        play_audio(tone, hardware)
+        play_audio(tone, hardware, args.start_sec, args.duration_sec)
         return
 
     if not args.schedule_id:
@@ -303,9 +384,16 @@ def main() -> None:
         logger.info("Toque %s pertenece a otro perfil; omitido.", args.schedule_id)
         return
 
+    item_start = float(item.get("startSec") or 0.0)
+    item_dur = float(item.get("playDurationSec") or 0.0)
     logger.info("Ejecutando toque systemd: %s (%s)", item.get("label"), item.get("time"))
     tone = tones_map.get(item.get("toneId"), tones_list[0])
-    play_audio(tone, hardware)
+    play_audio(
+        tone,
+        hardware,
+        args.start_sec if args.start_sec > 0 else item_start,
+        args.duration_sec if args.duration_sec > 0 else item_dur,
+    )
 
 
 if __name__ == "__main__":

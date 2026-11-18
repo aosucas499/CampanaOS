@@ -17,6 +17,8 @@ export interface BellScheduleItem {
   days: number[]; // 1 = Lunes ... 7 = Domingo
   toneId: string;
   enabled: boolean;
+  startSec?: number;
+  playDurationSec?: number | null;
 }
 
 export interface HolidayException {

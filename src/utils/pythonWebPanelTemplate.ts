@@ -733,6 +733,15 @@ class CampanaHandler(BaseHTTPRequestHandler):
                 if not hhmm or not label:
                     self._send_json(400, {"error": "Hora y etiqueta son obligatorios"})
                     return
+                try:
+                    start_sec = max(0, int(round(float(body.get("startSec") or 0))))
+                except (TypeError, ValueError):
+                    start_sec = 0
+                raw_dur = body.get("playDurationSec")
+                try:
+                    play_dur = int(round(float(raw_dur))) if raw_dur is not None and float(raw_dur) > 0 else None
+                except (TypeError, ValueError):
+                    play_dur = None
                 created = {
                     "id": "sch-" + uuid.uuid4().hex[:8],
                     "profileId": body.get("profileId") or data["activeProfileId"],
@@ -741,6 +750,8 @@ class CampanaHandler(BaseHTTPRequestHandler):
                     "days": body.get("days") or [1, 2, 3, 4, 5],
                     "toneId": body.get("toneId") or "classic-bell",
                     "enabled": bool(body.get("enabled", True)),
+                    "startSec": start_sec,
+                    "playDurationSec": play_dur,
                 }
                 data["schedules"].append(created)
                 data["schedules"].sort(key=lambda s: s["time"])
@@ -797,6 +808,15 @@ class CampanaHandler(BaseHTTPRequestHandler):
             if path_str == "/api/ring-now":
                 tone_id = str(body.get("toneId") or "classic-bell")
                 source = str(body.get("source") or "manual")
+                try:
+                    start_sec = max(0, int(round(float(body.get("startSec") or 0))))
+                except (TypeError, ValueError):
+                    start_sec = 0
+                raw_dur = body.get("playDurationSec")
+                try:
+                    play_dur = int(round(float(raw_dur))) if raw_dur is not None and float(raw_dur) > 0 else 0
+                except (TypeError, ValueError):
+                    play_dur = 0
                 tones_map = {t["id"]: t for t in data.get("tones", [])}
                 tone = tones_map.get(tone_id) or data["tones"][0]
                 now_dt = datetime.datetime.now()
@@ -812,7 +832,12 @@ class CampanaHandler(BaseHTTPRequestHandler):
                 data["logs"] = [log] + data.get("logs", [])[:119]
                 save_state(data)
                 if RUNNER_SCRIPT.exists():
-                    subprocess.Popen([sys.executable, str(RUNNER_SCRIPT), "--tone-id", tone["id"]])
+                    cmd = [sys.executable, str(RUNNER_SCRIPT), "--tone-id", tone["id"]]
+                    if start_sec > 0:
+                        cmd.extend(["--start-sec", str(start_sec)])
+                    if play_dur > 0:
+                        cmd.extend(["--duration-sec", str(play_dur)])
+                    subprocess.Popen(cmd)
                 self._send_json(200, {"log": log, "tone": tone, "state": build_client_state(data, sec, True)})
                 return
 
@@ -908,6 +933,21 @@ class CampanaHandler(BaseHTTPRequestHandler):
                         for key in ["time", "label", "days", "toneId", "enabled", "profileId"]:
                             if key in body:
                                 updated[key] = body[key]
+                        if "startSec" in body:
+                            try:
+                                updated["startSec"] = max(0, int(round(float(body.get("startSec") or 0))))
+                            except (TypeError, ValueError):
+                                updated["startSec"] = 0
+                        if "playDurationSec" in body:
+                            raw_dur = body.get("playDurationSec")
+                            try:
+                                updated["playDurationSec"] = (
+                                    int(round(float(raw_dur)))
+                                    if raw_dur is not None and float(raw_dur) > 0
+                                    else None
+                                )
+                            except (TypeError, ValueError):
+                                updated["playDurationSec"] = None
                         data["schedules"][idx] = updated
                         data["schedules"].sort(key=lambda s: s["time"])
                         save_state(data)

@@ -164,6 +164,19 @@ function countActiveTimers(s: BellAppState): number {
   ).length;
 }
 
+function normalizeStartSec(val: unknown): number {
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.round(num);
+}
+
+function normalizePlayDurationSec(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const num = Number(val);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return Math.round(num);
+}
+
 function loadState(secrets: AuthSecrets): BellAppState {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const defaults = createDefaultBellState({ systemdSupported: fs.existsSync(OPT_SYNC_SCRIPT) });
@@ -183,6 +196,8 @@ function loadState(secrets: AuthSecrets): BellAppState {
       days: s.days,
       toneId: s.toneId,
       enabled: s.enabled,
+      startSec: normalizeStartSec(s.startSec),
+      playDurationSec: normalizePlayDurationSec(s.playDurationSec),
     }));
     const normalizedLogs: BellLogEntry[] = (parsed.logs ?? defaults.logs).map((l) => ({
       id: l.id,
@@ -277,9 +292,20 @@ async function syncSystemdTimersIfInstalled(s: BellAppState): Promise<SystemdSyn
   });
 }
 
-function triggerHostAudioPlayback(tone: AudioTone, hardware: HardwareConfig) {
+function triggerHostAudioPlayback(
+  tone: AudioTone,
+  hardware: HardwareConfig,
+  startSec = 0,
+  playDurationSec: number | null = null,
+) {
+  const safeStart = normalizeStartSec(startSec);
+  const safeDur = normalizePlayDurationSec(playDurationSec);
+
   if (fs.existsSync(OPT_RUNNER_SCRIPT)) {
-    const child = spawn('/usr/bin/python3', [OPT_RUNNER_SCRIPT, '--tone-id', tone.id], {
+    const args = [OPT_RUNNER_SCRIPT, '--tone-id', tone.id];
+    if (safeStart > 0) args.push('--start-sec', String(safeStart));
+    if (safeDur !== null && safeDur > 0) args.push('--duration-sec', String(safeDur));
+    const child = spawn('/usr/bin/python3', args, {
       detached: true,
       stdio: 'ignore',
     });
@@ -292,7 +318,16 @@ function triggerHostAudioPlayback(tone: AudioTone, hardware: HardwareConfig) {
     const localFile = path.join(AUDIO_DIR, path.basename(tone.fileName));
     if (fs.existsSync(localFile)) {
       const cmd = hardware.audioBackend === 'mpg123' ? 'mpg123' : 'mpv';
-      const args = cmd === 'mpv' ? ['--no-video', `--volume=${hardware.masterVolume}`, localFile] : ['-q', localFile];
+      const args =
+        cmd === 'mpv'
+          ? [
+              '--no-video',
+              `--volume=${hardware.masterVolume}`,
+              ...(safeStart > 0 ? [`--start=${safeStart}`] : []),
+              ...(safeDur !== null && safeDur > 0 ? [`--length=${safeDur}`] : []),
+              localFile,
+            ]
+          : ['-q', localFile];
       const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
       child.on('error', () => {
         // Ignore when running inside a headless cloud container without audio tools
@@ -621,6 +656,8 @@ async function startServer() {
       days: Array.isArray(body.days) && body.days.length > 0 ? body.days : [1, 2, 3, 4, 5],
       toneId: body.toneId || 'classic-bell',
       enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+      startSec: normalizeStartSec(body.startSec),
+      playDurationSec: normalizePlayDurationSec(body.playDurationSec),
     };
     state.schedules.push(created);
     state.schedules.sort((a, b) => a.time.localeCompare(b.time));
@@ -637,15 +674,20 @@ async function startServer() {
       return;
     }
     const patch = req.body as Partial<BellScheduleItem>;
-    state.schedules[idx] = {
+    const updated: BellScheduleItem = {
       ...state.schedules[idx],
       ...patch,
       id,
+      ...(patch.startSec !== undefined ? { startSec: normalizeStartSec(patch.startSec) } : {}),
+      ...(patch.playDurationSec !== undefined
+        ? { playDurationSec: normalizePlayDurationSec(patch.playDurationSec) }
+        : {}),
     };
+    state.schedules[idx] = updated;
     state.schedules.sort((a, b) => a.time.localeCompare(b.time));
     saveState(state);
     await syncSystemdTimersIfInstalled(state);
-    res.json({ schedule: state.schedules[idx], state: buildClientState(true) });
+    res.json({ schedule: updated, state: buildClientState(true) });
   });
 
   app.delete('/api/schedules/:id', requireAdminAuth, async (req, res) => {
@@ -1094,16 +1136,23 @@ async function startServer() {
   });
 
   app.post('/api/ring-now', requireAdminAuth, (req, res) => {
-    const { toneId, label, source } = req.body as {
+    const { toneId, label, source, startSec, playDurationSec } = req.body as {
       toneId?: string;
       label?: string;
       source?: 'manual' | 'emergencia';
+      startSec?: number;
+      playDurationSec?: number | null;
     };
     const now = new Date();
     const { timeDisplay } = getLocalIsoDateAndMinute(now);
     const tone = state.tones.find((t) => t.id === (toneId || 'classic-bell')) ?? state.tones[0];
 
-    triggerHostAudioPlayback(tone, state.hardware);
+    triggerHostAudioPlayback(
+      tone,
+      state.hardware,
+      normalizeStartSec(startSec),
+      normalizePlayDurationSec(playDurationSec),
+    );
 
     const log: BellLogEntry = {
       id: `log-${crypto.randomUUID().slice(0, 8)}`,
@@ -1225,6 +1274,8 @@ async function startServer() {
             days: Array.isArray(s.days) ? s.days : [1, 2, 3, 4, 5],
             toneId: s.toneId || 'classic-bell',
             enabled: s.enabled !== undefined ? Boolean(s.enabled) : true,
+            startSec: normalizeStartSec(s.startSec),
+            playDurationSec: normalizePlayDurationSec(s.playDurationSec),
           }))
           .sort((a, b) => a.time.localeCompare(b.time))
       : [];

@@ -21,7 +21,7 @@ import type {
   HardwareConfig,
   HolidayException,
 } from './types/bell.ts';
-import { bellAudio } from './utils/bellAudio.ts';
+import { bellAudio, type PlayToneOptions } from './utils/bellAudio.ts';
 import { getActiveHoliday } from './utils/scheduleHelpers.ts';
 import { AuthGateModal } from './components/AuthGateModal.tsx';
 import { DashboardView } from './components/DashboardView.tsx';
@@ -114,7 +114,10 @@ export default function App() {
         lastBrowserMinuteRef.current = minuteKey;
         const tone = state.tones.find((t) => t.id === match.toneId);
         if (tone) {
-          bellAudio.playTone(tone, state.hardware.masterVolume);
+          bellAudio.playTone(tone, state.hardware.masterVolume, {
+            startSec: match.startSec,
+            playDurationSec: match.playDurationSec,
+          });
         }
         void fetchState();
       }
@@ -181,7 +184,12 @@ export default function App() {
     }
   };
 
-  const handleManualRing = async (toneId: string, label: string, source: 'manual' | 'emergencia') => {
+  const handleManualRing = async (
+    toneId: string,
+    label: string,
+    source: 'manual' | 'emergencia',
+    options?: { startSec?: number; playDurationSec?: number | null },
+  ) => {
     if (state?.security.authEnabled && !state.authenticated) {
       setShowUnlockModal(true);
       return;
@@ -189,13 +197,19 @@ export default function App() {
     if (state) {
       const tone = state.tones.find((t) => t.id === toneId) ?? state.tones[0];
       if (tone) {
-        bellAudio.playTone(tone, state.hardware.masterVolume);
+        bellAudio.playTone(tone, state.hardware.masterVolume, options);
       }
     }
     const res = await fetch('/api/ring-now', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toneId, label, source }),
+      body: JSON.stringify({
+        toneId,
+        label,
+        source,
+        startSec: options?.startSec,
+        playDurationSec: options?.playDurationSec,
+      }),
     });
     if (await handleProtectedResponse(res)) {
       const data = (await res.json()) as { state: BellAppState };
@@ -404,11 +418,11 @@ export default function App() {
     }
   };
 
-  const handlePreviewToneById = (toneId: string) => {
+  const handlePreviewToneById = (toneId: string, options?: PlayToneOptions) => {
     if (!state) return;
     const tone = state.tones.find((t) => t.id === toneId);
     if (tone) {
-      bellAudio.playTone(tone, state.hardware.masterVolume);
+      bellAudio.playTone(tone, state.hardware.masterVolume, options);
     }
   };
 
@@ -669,7 +683,7 @@ export default function App() {
                   browserAudioEnabled={browserAudioEnabled}
                   onToggleBrowserAudio={handleToggleBrowserAudio}
                   onSwitchProfile={(id) => void handleSwitchProfile(id)}
-                  onManualRing={(toneId, label, source) => void handleManualRing(toneId, label, source)}
+                  onManualRing={(toneId, label, source, opts) => void handleManualRing(toneId, label, source, opts)}
                   onStopAudio={() => bellAudio.stop()}
                   onClearLogs={() => void handleClearLogs()}
                   onNavigate={(tab) => setActiveTab(tab)}
@@ -679,11 +693,13 @@ export default function App() {
               {activeTab === 'horarios' && (
                 <SchedulesView
                   state={state}
+                  playingToneId={playingToneId}
                   onCreateSchedule={handleCreateSchedule}
                   onUpdateSchedule={handleUpdateSchedule}
                   onDeleteSchedule={handleDeleteSchedule}
                   onCreateProfile={handleCreateProfile}
                   onPreviewTone={handlePreviewToneById}
+                  onStopAudio={() => bellAudio.stop()}
                 />
               )}
 

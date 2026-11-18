@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Bell, CalendarOff, Play, ShieldAlert, Square, Trash2, Volume2 } from 'lucide-react';
 import type { BellAppState } from '../types/bell.ts';
+import { formatSecondsClock } from '../utils/bellAudio.ts';
 import { findNextBell, formatDaysSummary, getActiveHoliday } from '../utils/scheduleHelpers.ts';
 
 interface DashboardViewProps {
@@ -10,7 +11,12 @@ interface DashboardViewProps {
   browserAudioEnabled: boolean;
   onToggleBrowserAudio: () => void;
   onSwitchProfile: (profileId: string) => void;
-  onManualRing: (toneId: string, label: string, source: 'manual' | 'emergencia') => void;
+  onManualRing: (
+    toneId: string,
+    label: string,
+    source: 'manual' | 'emergencia',
+    options?: { startSec?: number; playDurationSec?: number | null },
+  ) => void;
   onStopAudio: () => void;
   onClearLogs: () => void;
   onNavigate: (tab: 'horarios' | 'hardware' | 'festivos' | 'despliegue') => void;
@@ -317,6 +323,14 @@ export function DashboardView({
                           {tone?.name ?? 'Timbre estándar'}
                           <span aria-hidden="true"> · </span>
                           {formatDaysSummary(item.days)}
+                          {(item.startSec && item.startSec > 0) || (item.playDurationSec && item.playDurationSec > 0) ? (
+                            <span className="font-mono tabular-nums text-slate-400">
+                              {' · '}
+                              {item.startSec && item.startSec > 0 ? `desde ${formatSecondsClock(item.startSec)}` : ''}
+                              {item.startSec && item.startSec > 0 && item.playDurationSec && item.playDurationSec > 0 ? ' · ' : ''}
+                              {item.playDurationSec && item.playDurationSec > 0 ? `${item.playDurationSec}s` : ''}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -347,7 +361,12 @@ export function DashboardView({
                       </span>
                       <button
                         type="button"
-                        onClick={() => onManualRing(item.toneId, `Prueba: ${item.label}`, 'manual')}
+                        onClick={() =>
+                          onManualRing(item.toneId, `Prueba: ${item.label}`, 'manual', {
+                            startSec: item.startSec,
+                            playDurationSec: item.playDurationSec,
+                          })
+                        }
                         title="Probar este toque ahora"
                         className="p-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
                       >

@@ -214,17 +214,40 @@ export function HardwareAudioView({
       return;
     }
 
+    const detectAudioDuration = (srcUrl: string): Promise<number> =>
+      new Promise((resolve) => {
+        const probe = new Audio(srcUrl);
+        let settled = false;
+        const done = (secs: number) => {
+          if (settled) return;
+          settled = true;
+          probe.src = '';
+          resolve(secs);
+        };
+        probe.addEventListener(
+          'loadedmetadata',
+          () => {
+            const dur = Number.isFinite(probe.duration) && probe.duration > 0 ? Math.round(probe.duration) : 5;
+            done(Math.max(1, dur));
+          },
+          { once: true },
+        );
+        probe.addEventListener('error', () => done(5), { once: true });
+        window.setTimeout(() => done(5), 2500);
+      });
+
     const reader = new FileReader();
     reader.onload = async () => {
       const dataUrl = reader.result as string;
       const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ');
+      const realDuration = await detectAudioDuration(dataUrl);
       await onUploadTone({
         name: cleanName,
         description: `Audio personalizado (${file.name})`,
         fileName: file.name,
         mimeType: file.type || 'audio/mpeg',
         dataUrl,
-        durationSec: 5,
+        durationSec: realDuration,
       });
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
