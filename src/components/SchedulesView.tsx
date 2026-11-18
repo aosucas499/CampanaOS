@@ -62,10 +62,11 @@ export function SchedulesView({
   const maxRemainingDur = Math.max(1, effectiveTrackDur - clampedStartSec);
   const sliderMaxDur = isCustomTone ? Math.max(5, Math.min(300, maxRemainingDur)) : 10;
 
+  const selectedToneId = selectedTone?.id;
+
   useEffect(() => {
     if (!isModalOpen || !selectedTone) return;
     setDetectedDurationSec(null);
-    setPlayerCurrentSec(0);
     setPlayerTotalSec(selectedTone.durationSec || 5);
 
     if (selectedTone.category !== 'custom' || (!selectedTone.dataUrl && !selectedTone.fileName)) {
@@ -91,7 +92,8 @@ export function SchedulesView({
       probe.removeEventListener('loadedmetadata', handleMeta);
       probe.src = '';
     };
-  }, [isModalOpen, selectedTone]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isModalOpen, selectedToneId]);
 
   useEffect(() => {
     if (playingToneId === null && isModalOpen) {
