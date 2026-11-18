@@ -7,9 +7,9 @@ Sistema autónomo de automatización de timbres escolares por **audio puro** hac
 En tu Raspberry Pi o PC Linux, clona el repositorio y ejecuta el instalador como superusuario:
 
 ```bash
-git clone <URL-DE-TU-REPOSITORIO> campana-os
+git clone http://github.com/aosucas499//campana-os
 cd campana-os
-sudo bash install.sh
+sudo ./install.sh
 ```
 
 El instalador (`install.sh`):
